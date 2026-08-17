@@ -12,6 +12,10 @@ from .engine import Config, Engine
 from .overlay import OverlayProcess
 
 
+def elapsed_time() -> float:
+    return time.clock_gettime(time.CLOCK_BOOTTIME)
+
+
 def xdg_path(variable: str, fallback: str, name: str) -> Path:
     return Path(os.environ.get(variable, str(Path.home() / fallback))) / "omookaway" / name
 
@@ -28,7 +32,7 @@ class StateFiles:
             return Engine(Config(), now, civil_now)
 
     def publish(self, engine: Engine, now: float, civil_now: datetime | None = None) -> None:
-        self._write(self.state_path, engine.snapshot(now), private=True)
+        self._write(self.state_path, engine.snapshot(now, civil_now), private=True)
         self._write(self.status_path, engine.status(now, civil_now), private=False)
 
     @staticmethod
@@ -52,7 +56,7 @@ class Daemon:
     ) -> None:
         self.socket_path = socket_path
         self.files = files
-        self.engine = files.load(time.monotonic(), datetime.now().astimezone())
+        self.engine = files.load(elapsed_time(), datetime.now().astimezone())
         self.overlay = overlay or OverlayProcess(
             Path(__file__).with_name("break_overlay.qml"), self.overlay_failed
         )
@@ -60,7 +64,7 @@ class Daemon:
     async def overlay_failed(self, error: str) -> None:
         if self.engine.state not in {"starting_break", "break"}:
             return
-        now = time.monotonic()
+        now = elapsed_time()
         civil_now = datetime.now().astimezone()
         self.engine.apply({"type": "overlay_failed", "error": error}, now, civil_now)
         self.files.publish(self.engine, now, civil_now)
@@ -78,7 +82,7 @@ class Daemon:
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             request = json.loads((await reader.readline()).decode())
-            now = time.monotonic()
+            now = elapsed_time()
             civil_now = datetime.now().astimezone()
             if request.get("type") == "status":
                 response = self.engine.status(now, civil_now)
@@ -89,7 +93,7 @@ class Daemon:
             writer.write((json.dumps(response, separators=(",", ":")) + "\n").encode())
             await writer.drain()
         except (ValueError, json.JSONDecodeError) as error:
-            response = self.engine.status(time.monotonic(), datetime.now().astimezone())
+            response = self.engine.status(elapsed_time(), datetime.now().astimezone())
             response["error"] = str(error)
             writer.write((json.dumps(response, separators=(",", ":")) + "\n").encode())
         finally:
@@ -99,7 +103,7 @@ class Daemon:
     async def tick(self) -> None:
         while True:
             await asyncio.sleep(1)
-            now = time.monotonic()
+            now = elapsed_time()
             civil_now = datetime.now().astimezone()
             self.engine.apply({"type": "time"}, now, civil_now)
             response = self.engine.status(now, civil_now)
@@ -109,7 +113,7 @@ class Daemon:
     async def run(self) -> None:
         self.socket_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.socket_path.unlink(missing_ok=True)
-        self.files.publish(self.engine, time.monotonic(), datetime.now().astimezone())
+        self.files.publish(self.engine, elapsed_time(), datetime.now().astimezone())
         server = await asyncio.start_unix_server(self.handle, path=self.socket_path)
         os.chmod(self.socket_path, 0o600)
         try:

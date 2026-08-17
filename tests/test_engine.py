@@ -568,6 +568,13 @@ class EngineAcceptanceTest(unittest.TestCase):
             engine.status(60, datetime(2026, 8, 17, 9, 1))["active_elapsed_seconds"], 60
         )
 
+    def test_idle_threshold_is_positive_config_and_published_for_the_observer(self):
+        engine = Engine(Config(idle_threshold_seconds=120), now=0)
+
+        self.assertEqual(engine.status(0)["idle_threshold_seconds"], 120)
+        with self.assertRaisesRegex(ValueError, "idle_threshold_seconds must be positive"):
+            Config(idle_threshold_seconds=0)
+
     def test_configuration_change_reconciles_without_an_overdue_break(self):
         monday = datetime(2026, 8, 17, 9, 0)
         engine = Engine(
@@ -640,14 +647,182 @@ class EngineAcceptanceTest(unittest.TestCase):
         engine.apply({"type": "activity", "active": True}, now=0)
         engine.apply({"type": "time"}, now=600)
         idle = engine.apply({"type": "activity", "active": False}, now=600)
-        still_idle = engine.apply({"type": "time"}, now=1600)
-        resumed = engine.apply({"type": "activity", "active": True}, now=1600)
-        advanced = engine.apply({"type": "time"}, now=1700)
+        still_idle = engine.apply({"type": "time"}, now=800)
+        resumed = engine.apply({"type": "activity", "active": True}, now=800)
+        advanced = engine.apply({"type": "time"}, now=900)
 
         self.assertEqual(idle["state"], "idle")
         self.assertEqual(still_idle["active_elapsed_seconds"], 600)
         self.assertEqual(resumed["state"], "work_interval")
         self.assertEqual(advanced["active_elapsed_seconds"], 700)
+
+    def test_idle_as_long_as_a_break_satisfies_recovery_on_active_return(self):
+        engine = Engine(Config(break_seconds=300), now=0)
+        engine.apply({"type": "activity", "active": True}, now=0)
+        engine.apply({"type": "time"}, now=600)
+        engine.apply({"type": "activity", "active": False}, now=600)
+
+        away = engine.apply({"type": "time"}, now=900)
+        resumed = engine.apply({"type": "activity", "active": True}, now=901)
+
+        self.assertEqual(away["state"], "idle")
+        self.assertEqual(away["last_break_outcome"], "satisfied")
+        self.assertEqual(away["today_satisfied_breaks"], 1)
+        self.assertEqual(resumed["state"], "work_interval")
+        self.assertEqual(resumed["active_elapsed_seconds"], 0)
+
+    def test_lock_time_satisfies_recovery_and_waits_for_active_input(self):
+        engine = Engine(Config(break_seconds=300), now=0)
+        engine.apply({"type": "activity", "active": True}, now=0)
+        engine.apply({"type": "time"}, now=120)
+
+        engine.apply({"type": "lock", "locked": True}, now=120)
+        unlocked = engine.apply({"type": "lock", "locked": False}, now=420)
+        resumed = engine.apply({"type": "activity", "active": True}, now=421)
+
+        self.assertEqual(unlocked["state"], "idle")
+        self.assertEqual(unlocked["last_break_outcome"], "satisfied")
+        self.assertEqual(unlocked["active_elapsed_seconds"], 0)
+        self.assertEqual(resumed["state"], "work_interval")
+
+    def test_away_period_spanning_idle_lock_and_suspend_is_counted_once(self):
+        engine = Engine(Config(break_seconds=300), now=0)
+        engine.apply({"type": "activity", "active": True}, now=0)
+        engine.apply({"type": "activity", "active": False}, now=100)
+        engine.apply({"type": "lock", "locked": True}, now=150)
+        engine.apply({"type": "activity", "active": True}, now=200)
+        engine.apply({"type": "suspend", "suspended": True}, now=250)
+
+        resumed = engine.apply({"type": "suspend", "suspended": False}, now=400)
+        unlocked = engine.apply({"type": "lock", "locked": False}, now=401)
+        active = engine.apply({"type": "activity", "active": True}, now=402)
+
+        self.assertEqual(resumed["today_satisfied_breaks"], 1)
+        self.assertEqual(unlocked["today_satisfied_breaks"], 1)
+        self.assertEqual(unlocked["state"], "work_interval")
+        self.assertEqual(active["state"], "work_interval")
+        self.assertEqual(active["today_satisfied_breaks"], 1)
+
+    def test_away_crossing_work_hours_starts_the_next_window_fresh(self):
+        engine = Engine(
+            Config(
+                break_seconds=60,
+                work_hours={"monday": [["09:00", "09:02"], ["09:03", "10:00"]]},
+            ),
+            now=0,
+            civil_now=datetime(2026, 8, 17, 9, 0),
+        )
+        engine.apply(
+            {"type": "activity", "active": True}, 0, datetime(2026, 8, 17, 9, 0)
+        )
+        engine.apply({"type": "time"}, 60, datetime(2026, 8, 17, 9, 1))
+        engine.apply(
+            {"type": "suspend", "suspended": True},
+            60,
+            datetime(2026, 8, 17, 9, 1),
+        )
+
+        dormant = engine.apply(
+            {"type": "time"}, 120, datetime(2026, 8, 17, 9, 2)
+        )
+        next_window = engine.apply(
+            {"type": "suspend", "suspended": False},
+            180,
+            datetime(2026, 8, 17, 9, 3),
+        )
+        active = engine.apply(
+            {"type": "activity", "active": True},
+            181,
+            datetime(2026, 8, 17, 9, 3, 1),
+        )
+
+        self.assertEqual(dormant["state"], "dormant")
+        self.assertEqual(next_window["state"], "idle")
+        self.assertEqual(active["active_elapsed_seconds"], 0)
+        self.assertEqual(active["today_satisfied_breaks"], 0)
+        self.assertFalse(active["upcoming_break"])
+
+    def test_away_period_survives_daemon_restart_and_counts_downtime(self):
+        started = datetime(2026, 8, 17, 9, 0)
+        engine = Engine(Config(break_seconds=300), now=0, civil_now=started)
+        engine.apply({"type": "activity", "active": True}, 0, started)
+        engine.apply(
+            {"type": "suspend", "suspended": True},
+            60,
+            datetime(2026, 8, 17, 9, 1),
+        )
+
+        restored = Engine.restore(
+            engine.snapshot(60, datetime(2026, 8, 17, 9, 1)),
+            now=5000,
+            civil_now=datetime(2026, 8, 17, 9, 6),
+        )
+        resumed = restored.apply(
+            {"type": "suspend", "suspended": False},
+            5000,
+            datetime(2026, 8, 17, 9, 6),
+        )
+
+        self.assertEqual(resumed["state"], "idle")
+        self.assertEqual(resumed["last_break_outcome"], "satisfied")
+        self.assertEqual(resumed["today_satisfied_breaks"], 1)
+
+    def test_qualifying_away_time_satisfies_an_upcoming_break(self):
+        engine = Engine(
+            Config(work_interval_seconds=60, warning_seconds=20, break_seconds=300),
+            now=0,
+        )
+        engine.apply({"type": "activity", "active": True}, now=0)
+        engine.apply({"type": "time"}, now=60)
+        engine.apply({"type": "activity", "active": False}, now=65)
+
+        recovered = engine.apply({"type": "time"}, now=365)
+
+        self.assertEqual(recovered["state"], "idle")
+        self.assertFalse(recovered["upcoming_break"])
+        self.assertEqual(recovered["last_break_outcome"], "satisfied")
+        self.assertEqual(recovered["today_satisfied_breaks"], 1)
+        self.assertEqual(recovered["requested_effects"], [])
+
+    def test_active_input_before_unlock_starts_the_fresh_work_interval(self):
+        engine = Engine(Config(break_seconds=300), now=0)
+        engine.apply({"type": "activity", "active": True}, now=0)
+        engine.apply({"type": "lock", "locked": True}, now=100)
+        engine.apply({"type": "time"}, now=400)
+
+        still_locked = engine.apply({"type": "activity", "active": True}, now=401)
+        unlocked = engine.apply({"type": "lock", "locked": False}, now=402)
+
+        self.assertEqual(still_locked["state"], "idle")
+        self.assertEqual(unlocked["state"], "work_interval")
+        self.assertEqual(unlocked["active_elapsed_seconds"], 0)
+
+    def test_qualifying_away_time_satisfies_a_paused_upcoming_break(self):
+        started = datetime(2026, 8, 17, 9, 0)
+        engine = Engine(
+            Config(work_interval_seconds=60, break_seconds=300), 0, started
+        )
+        engine.apply({"type": "activity", "active": True}, 0, started)
+        engine.apply({"type": "time"}, 60, datetime(2026, 8, 17, 9, 1))
+        engine.apply(
+            {"type": "pause", "resume_at": "2026-08-17T10:00:00"},
+            60,
+            datetime(2026, 8, 17, 9, 1),
+        )
+        engine.apply(
+            {"type": "lock", "locked": True},
+            61,
+            datetime(2026, 8, 17, 9, 1, 1),
+        )
+
+        recovered = engine.apply(
+            {"type": "time"}, 361, datetime(2026, 8, 17, 9, 6, 1)
+        )
+
+        self.assertEqual(recovered["state"], "idle")
+        self.assertFalse(recovered["upcoming_break"])
+        self.assertEqual(recovered["last_break_outcome"], "satisfied")
+        self.assertNotIn("pause_deadline", recovered)
 
     def test_restored_warning_remains_owed(self):
         engine = Engine(Config(), now=0)

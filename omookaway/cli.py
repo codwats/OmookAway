@@ -23,6 +23,10 @@ def main() -> None:
     subparsers.add_parser("status")
     activity = subparsers.add_parser("activity")
     activity.add_argument("state", choices=("active", "idle"))
+    lock = subparsers.add_parser("lock")
+    lock.add_argument("state", choices=("locked", "unlocked"))
+    suspend = subparsers.add_parser("suspend")
+    suspend.add_argument("state", choices=("suspended", "resumed"))
     configure = subparsers.add_parser("configure")
     configure.add_argument("file", type=Path)
     ready = subparsers.add_parser("overlay-ready")
@@ -43,6 +47,10 @@ def main() -> None:
         message = {"type": "status"}
     elif args.command == "activity":
         message = {"type": "activity", "active": args.state == "active"}
+    elif args.command == "lock":
+        message = {"type": "lock", "locked": args.state == "locked"}
+    elif args.command == "suspend":
+        message = {"type": "suspend", "suspended": args.state == "suspended"}
     elif args.command == "overlay-ready":
         message = {
             "type": "overlay_ready",

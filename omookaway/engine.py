@@ -64,6 +64,7 @@ class Config:
     work_interval_seconds: int = 30 * 60
     warning_seconds: int = 20
     break_seconds: int = 5 * 60
+    idle_threshold_seconds: int = 5 * 60
     snooze_seconds: int = 5 * 60
     snooze_budget: int = 3
     work_hours: Any = None
@@ -73,6 +74,7 @@ class Config:
             "work_interval_seconds",
             "warning_seconds",
             "break_seconds",
+            "idle_threshold_seconds",
             "snooze_seconds",
         ):
             value = getattr(self, name)
@@ -114,7 +116,12 @@ class Engine:
         self.window = self._window_at(civil_now or datetime.now().astimezone())
         self.state = "idle" if self.window is not None else "dormant"
         self.active = False
+        self.input_active = False
         self.active_elapsed = 0.0
+        self.away_sources: set[str] = set()
+        self.away_started_at: float | None = None
+        self.away_started_civil: datetime | None = None
+        self.away_satisfied = False
         self.last_at = now
         self.warning_deadline: float | None = None
         self.snooze_deadline: float | None = None
@@ -168,12 +175,40 @@ class Engine:
             ):
                 self.active_elapsed = 0.0
         elif event.get("type") == "activity":
-            self.active = event.get("active") is True
+            observed_active = event.get("active") is True
+            self.input_active = observed_active
+            if observed_active:
+                self.away_sources.discard("idle")
+            else:
+                self.away_sources.add("idle")
+            self.active = self.input_active and not self.away_sources
+            if self.active:
+                self.away_started_at = None
+                self.away_started_civil = None
+                self.away_satisfied = False
+            else:
+                self._begin_away(now, civil_now)
             if self.window is None:
                 self.state = "dormant"
             elif self.state == "pause":
                 pass
             elif self.state not in self.UPCOMING_BREAK_STATES:
+                self.state = "work_interval" if self.active else "idle"
+        elif event.get("type") in {"lock", "suspend"}:
+            source = event["type"]
+            away = event.get("locked" if source == "lock" else "suspended") is True
+            if away:
+                self.away_sources.add(source)
+                self.active = False
+                self._begin_away(now, civil_now)
+            else:
+                self.away_sources.discard(source)
+                self.active = self.input_active and not self.away_sources
+            if (
+                self.window is not None
+                and self.state != "pause"
+                and self.state not in self.UPCOMING_BREAK_STATES
+            ):
                 self.state = "work_interval" if self.active else "idle"
         elif event.get("type") == "overlay_ready":
             if self.state not in {"starting_break", "break"}:
@@ -260,6 +295,32 @@ class Engine:
                 self.warning_deadline = self.last_at + due_in + self.config.warning_seconds
             else:
                 self.active_elapsed += elapsed
+        if (
+            self.away_started_at is not None
+            and not self.away_satisfied
+            and now - self.away_started_at >= self.config.break_seconds
+            and (
+                self.state in {"idle", "pause"}
+                or self.state in self.UPCOMING_BREAK_STATES
+            )
+        ):
+            release_break = self.state in {"starting_break", "break"}
+            self.away_satisfied = True
+            self.active_elapsed = 0.0
+            self.last_break_outcome = "satisfied"
+            self.today_satisfied_breaks += 1
+            self.warning_deadline = None
+            self.snooze_deadline = None
+            self.pause_deadline = None
+            self.paused_upcoming_break = False
+            self.snoozes_remaining = None
+            self.upcoming_break_snooze_seconds = None
+            self.break_started_at = None
+            self.break_deadline = None
+            self.enforcement_error = None
+            self.state = "idle"
+            if release_break:
+                self.requested_effects.append({"type": "release_break"})
         if self.state == "warning" and self.warning_deadline is not None:
             if now >= self.warning_deadline:
                 self.state = "starting_break"
@@ -279,6 +340,12 @@ class Engine:
             if now >= self.break_deadline:
                 self._finish_break("satisfied")
         self.last_at = now
+
+    def _begin_away(self, now: float, civil_now: datetime) -> None:
+        if self.away_started_at is None:
+            self.input_active = False
+            self.away_started_at = now
+            self.away_started_civil = civil_now
 
     def _resume(self, now: float) -> None:
         if self.paused_upcoming_break:
@@ -341,7 +408,11 @@ class Engine:
             return False
         self.window = window
         self.active = False
+        self.input_active = False
         self.active_elapsed = 0.0
+        self.away_started_at = None
+        self.away_started_civil = None
+        self.away_satisfied = False
         self.warning_deadline = None
         self.snooze_deadline = None
         self.pause_deadline = None
@@ -373,6 +444,7 @@ class Engine:
         result: dict[str, Any] = {
             "state": self.state,
             "work_interval_seconds": self.config.work_interval_seconds,
+            "idle_threshold_seconds": self.config.idle_threshold_seconds,
             "active_elapsed_seconds": round(elapsed, 3),
             "progress": elapsed / self.config.work_interval_seconds,
             "upcoming_break": self.state in self.UPCOMING_BREAK_STATES
@@ -415,13 +487,23 @@ class Engine:
             result["enforcement_error"] = self.enforcement_error
         return result
 
-    def snapshot(self, now: float) -> dict[str, Any]:
+    def snapshot(
+        self, now: float, civil_now: datetime | None = None
+    ) -> dict[str, Any]:
         return {
             "version": 1,
             "config": asdict(self.config),
             "state": self.state,
             "active": self.active,
+            "input_active": self.input_active,
             "active_elapsed_seconds": self.active_elapsed,
+            "away_sources": sorted(self.away_sources),
+            "away_started_civil": (
+                self.away_started_civil.isoformat()
+                if self.away_started_civil is not None
+                else None
+            ),
+            "away_satisfied": self.away_satisfied,
             "warning_remaining_seconds": (
                 max(0, self.warning_deadline - now) if self.warning_deadline is not None else None
             ),
@@ -467,7 +549,23 @@ class Engine:
             raise ValueError("invalid lifecycle state")
         engine.state = state
         engine.active = snapshot["active"] is True
+        engine.input_active = snapshot.get("input_active", engine.active) is True
         engine.active_elapsed = float(snapshot["active_elapsed_seconds"])
+        engine.away_sources = set(snapshot.get("away_sources", ()))
+        away_started_civil = snapshot.get("away_started_civil")
+        engine.away_started_civil = (
+            datetime.fromisoformat(away_started_civil)
+            if away_started_civil is not None
+            else None
+        )
+        engine.away_satisfied = snapshot.get("away_satisfied") is True
+        if engine.away_started_civil is not None:
+            restored_at = civil_now or datetime.now().astimezone()
+            elapsed = max(
+                0.0,
+                (restored_at - engine.away_started_civil).total_seconds(),
+            )
+            engine.away_started_at = now - elapsed
         remaining = snapshot.get("warning_remaining_seconds")
         engine.warning_deadline = now + float(remaining) if remaining is not None else None
         snooze_remaining = snapshot.get("snooze_remaining_seconds")

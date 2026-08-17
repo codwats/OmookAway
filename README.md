@@ -3,7 +3,10 @@
 OmookAway counts aggregate active use and publishes a 30-minute Work Interval
 to an Omarchy Shell widget. Idle transitions come from Quickshell's
 `ext-idle-notify-v1` monitor; the integration never receives raw input or
-application context.
+application context. Screen-lock and suspend/resume transitions come from
+systemd-logind and join Idle as one continuous away period. Away time at least
+as long as a Break records a Satisfied Break and waits for active input before
+starting a fresh Work Interval.
 
 When a Warning expires, the daemon starts a separate Quickshell process for the
 Break. Enforcement begins only after Quickshell reports a mapped overlay on
@@ -61,6 +64,8 @@ dormant:
 {
   "work_interval_seconds": 1800,
   "warning_seconds": 20,
+  "break_seconds": 300,
+  "idle_threshold_seconds": 300,
   "snooze_seconds": 300,
   "snooze_budget": 3,
   "work_hours": {

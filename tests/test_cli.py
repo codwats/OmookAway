@@ -9,6 +9,25 @@ from omookaway import cli
 
 
 class ShellCommandContractTest(unittest.TestCase):
+    def test_activity_observer_uses_the_published_idle_threshold(self):
+        observer = (
+            Path(__file__).parents[1] / "integrations" / "activity" / "shell.qml"
+        ).read_text()
+
+        self.assertIn("idle_threshold_seconds", observer)
+        self.assertIn("watchChanges: true", observer)
+
+    def test_activity_observer_forwards_logind_lock_and_sleep_signals(self):
+        observer = (
+            Path(__file__).parents[1] / "integrations" / "activity" / "shell.qml"
+        ).read_text()
+
+        self.assertIn("PrepareForSleep", observer)
+        self.assertIn("member='Lock'", observer)
+        self.assertIn("member='Unlock'", observer)
+        self.assertIn('"omookaway", "lock"', observer)
+        self.assertIn('"omookaway", "suspend"', observer)
+
     def test_shell_widget_invokes_the_public_start_break_command(self):
         widget = (
             Path(__file__).parents[1]
@@ -79,6 +98,31 @@ class ShellCommandContractTest(unittest.TestCase):
 
         request.assert_awaited_once_with({"type": "resume"})
         self.assertEqual(json.loads(output.getvalue())["state"], "work_interval")
+
+    def test_lock_and_suspend_transitions_send_public_engine_events(self):
+        request = AsyncMock(return_value={"state": "idle"})
+
+        for argv, event in (
+            (["omookaway", "lock", "locked"], {"type": "lock", "locked": True}),
+            (
+                ["omookaway", "suspend", "resumed"],
+                {"type": "suspend", "suspended": False},
+            ),
+        ):
+            with (
+                patch("sys.argv", argv),
+                patch.object(cli, "request", request),
+                redirect_stdout(StringIO()),
+            ):
+                cli.main()
+
+        self.assertEqual(
+            [call.args[0] for call in request.await_args_list],
+            [
+                {"type": "lock", "locked": True},
+                {"type": "suspend", "suspended": False},
+            ],
+        )
 
 
 if __name__ == "__main__":
