@@ -41,6 +41,32 @@ class EngineAcceptanceTest(unittest.TestCase):
         self.assertEqual(finished["active_elapsed_seconds"], 0)
         self.assertEqual(finished["requested_effects"], [{"type": "release_break"}])
 
+    def test_manual_break_control_supports_satisfied_and_aborted_outcomes(self):
+        def manual_break() -> Engine:
+            engine = Engine(Config(break_seconds=100), now=0)
+            engine.apply({"type": "activity", "active": True}, now=0)
+            engine.apply({"type": "start_manual_break"}, now=10)
+            engine.apply(
+                {
+                    "type": "overlay_ready",
+                    "display_ids": ["display"],
+                    "covered_display_ids": ["display"],
+                    "input_inhibited": True,
+                },
+                now=10,
+            )
+            return engine
+
+        aborted = manual_break().apply({"type": "finish_break"}, now=29.999)
+        satisfied = manual_break().apply({"type": "finish_break"}, now=30)
+
+        self.assertEqual(aborted["last_break_outcome"], "aborted")
+        self.assertEqual(aborted["today_aborted_breaks"], 1)
+        self.assertEqual(aborted["active_elapsed_seconds"], 0)
+        self.assertEqual(satisfied["last_break_outcome"], "satisfied")
+        self.assertEqual(satisfied["today_satisfied_breaks"], 1)
+        self.assertEqual(satisfied["active_elapsed_seconds"], 0)
+
     def test_manual_break_is_rejected_outside_work_hours_and_when_one_is_starting(self):
         monday = datetime(2026, 8, 17, 9, 0)
         dormant = Engine(

@@ -2,12 +2,24 @@ import json
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from omookaway import cli
 
 
 class ShellCommandContractTest(unittest.TestCase):
+    def test_shell_widget_invokes_the_public_start_break_command(self):
+        widget = (
+            Path(__file__).parents[1]
+            / "integrations"
+            / "omarchy-shell"
+            / "BarWidget.qml"
+        ).read_text()
+
+        self.assertIn('command: ["omookaway", "start-break"]', widget)
+        self.assertIn('commands.indexOf("start_manual_break")', widget)
+
     def test_start_break_sends_the_manual_break_command(self):
         output = StringIO()
         request = AsyncMock(return_value={"state": "starting_break"})
