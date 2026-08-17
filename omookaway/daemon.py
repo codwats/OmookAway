@@ -66,8 +66,11 @@ class Daemon:
             return
         now = elapsed_time()
         civil_now = datetime.now().astimezone()
-        self.engine.apply({"type": "overlay_failed", "error": error}, now, civil_now)
+        response = self.engine.apply(
+            {"type": "overlay_failed", "error": error}, now, civil_now
+        )
         self.files.publish(self.engine, now, civil_now)
+        await self.dispatch_effects(response)
 
     async def dispatch_effects(self, response: dict[str, Any]) -> None:
         for effect in response.get("requested_effects", ()):

@@ -112,11 +112,11 @@ class DaemonOverlayContractTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_process_launch_failure_returns_to_an_owed_warning(self):
         class FailedOverlay:
+            def __init__(self):
+                self.release = AsyncMock()
+
             async def launch(self):
                 raise OSError("quickshell unavailable")
-
-            async def release(self):
-                pass
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -132,12 +132,14 @@ class DaemonOverlayContractTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status["state"], "warning")
             self.assertTrue(status["upcoming_break"])
             self.assertIn("quickshell unavailable", status["enforcement_error"])
+            daemon.overlay.release.assert_awaited_once_with()
 
     async def test_overlay_process_exit_fails_open_through_the_engine_seam(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             files = StateFiles(root / "state.json", root / "status.json")
-            daemon = Daemon(root / "engine.sock", files, overlay=object())
+            overlay = AsyncMock()
+            daemon = Daemon(root / "engine.sock", files, overlay=overlay)
             daemon.engine = Engine(
                 Config(work_interval_seconds=1, warning_seconds=1), now=0
             )
@@ -150,6 +152,28 @@ class DaemonOverlayContractTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status["state"], "warning")
             self.assertTrue(status["upcoming_break"])
             self.assertEqual(status["enforcement_error"], "process crashed")
+            overlay.release.assert_awaited_once_with()
+
+    async def test_display_disconnect_and_hotplug_release_partial_coverage(self):
+        for error in ("display disconnected", "display topology changed"):
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                overlay = AsyncMock()
+                daemon = Daemon(
+                    root / "engine.sock",
+                    StateFiles(root / "state.json", root / "status.json"),
+                    overlay=overlay,
+                )
+                daemon.engine = Engine(Config(), now=0)
+                daemon.engine.apply({"type": "start_manual_break"}, now=0)
+
+                await daemon.overlay_failed(error)
+
+                status = daemon.engine.status(0)
+                self.assertEqual(status["state"], "warning")
+                self.assertTrue(status["upcoming_break"])
+                self.assertEqual(status["enforcement_error"], error)
+                overlay.release.assert_awaited_once_with()
 
 
 if __name__ == "__main__":
