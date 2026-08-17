@@ -439,7 +439,7 @@ class EngineAcceptanceTest(unittest.TestCase):
         self.assertEqual(requested["state"], "starting_break")
         self.assertEqual(requested["requested_effects"], [{"type": "launch_break"}])
 
-    def test_daemon_restart_clears_enforcement_unavailable_for_one_fresh_attempt(self):
+    def test_daemon_restart_preserves_failures_and_makes_one_fresh_attempt(self):
         engine = Engine(Config(work_interval_seconds=1, warning_seconds=1), now=0)
         engine.apply({"type": "activity", "active": True}, now=0)
         engine.apply({"type": "time"}, now=2)
@@ -452,7 +452,7 @@ class EngineAcceptanceTest(unittest.TestCase):
         retried = restored.apply({"type": "time"}, now=100)
 
         self.assertEqual(retried["state"], "starting_break")
-        self.assertEqual(retried["consecutive_enforcement_failures"], 0)
+        self.assertEqual(retried["consecutive_enforcement_failures"], 2)
         self.assertEqual(retried["requested_effects"], [{"type": "launch_break"}])
 
     def test_daemon_restart_revalidates_an_active_break_before_enforcing(self):
@@ -468,7 +468,7 @@ class EngineAcceptanceTest(unittest.TestCase):
         self.assertEqual(retried["state"], "starting_break")
         self.assertEqual(retried["requested_effects"], [{"type": "launch_break"}])
 
-    def test_daemon_restart_clears_a_single_enforcement_failure(self):
+    def test_daemon_restart_preserves_a_single_enforcement_failure(self):
         engine = Engine(Config(work_interval_seconds=1, warning_seconds=1), now=0)
         engine.apply({"type": "activity", "active": True}, now=0)
         engine.apply({"type": "time"}, now=2)
@@ -477,7 +477,7 @@ class EngineAcceptanceTest(unittest.TestCase):
 
         restored = Engine.restore(engine.snapshot(3), now=100)
 
-        self.assertEqual(restored.status(100)["consecutive_enforcement_failures"], 0)
+        self.assertEqual(restored.status(100)["consecutive_enforcement_failures"], 1)
 
     @staticmethod
     def _start_manual_break(overlay_ready_at: float = 10) -> Engine:
@@ -922,6 +922,89 @@ class EngineAcceptanceTest(unittest.TestCase):
         self.assertEqual(restored.status(now=9000)["state"], "warning")
         self.assertTrue(restored.status(now=9000)["upcoming_break"])
         self.assertEqual(restored.status(now=9000)["deadline_in_seconds"], 15)
+
+    def test_restart_reconciles_every_durable_lifecycle_state(self):
+        civil_now = datetime(2026, 8, 17, 9, 0)
+
+        def in_state(state):
+            config = Config(
+                work_interval_seconds=60,
+                warning_seconds=20,
+                break_seconds=100,
+                work_hours={"monday": [["09:00", "10:00"]]},
+            )
+            if state == "dormant":
+                return Engine(config, 0, datetime(2026, 8, 17, 8, 0))
+            engine = Engine(config, 0, civil_now)
+            if state == "idle":
+                return engine
+            engine.apply({"type": "activity", "active": True}, 0, civil_now)
+            if state == "work_interval":
+                return engine
+            engine.apply({"type": "time"}, 60, civil_now)
+            if state == "warning":
+                return engine
+            if state == "snooze":
+                engine.apply({"type": "snooze"}, 60, civil_now)
+                return engine
+            if state == "pause":
+                engine.apply(
+                    {"type": "pause", "resume_at": "2026-08-17T09:30:00"},
+                    60,
+                    civil_now,
+                )
+                return engine
+            engine.apply({"type": "time"}, 80, civil_now)
+            if state == "starting_break":
+                return engine
+            engine.apply(
+                {
+                    "type": "overlay_ready",
+                    "display_ids": ["display"],
+                    "covered_display_ids": ["display"],
+                    "input_inhibited": True,
+                },
+                80,
+                civil_now,
+            )
+            if state == "break":
+                return engine
+            engine.apply({"type": "overlay_failed"}, 81, civil_now)
+            engine.apply({"type": "time"}, 81, civil_now)
+            engine.apply({"type": "overlay_failed"}, 82, civil_now)
+            return engine
+
+        expected = {
+            "dormant": "dormant",
+            "idle": "activity_unavailable",
+            "work_interval": "activity_unavailable",
+            "warning": "warning",
+            "snooze": "snooze",
+            "pause": "pause",
+            "starting_break": "warning",
+            "break": "warning",
+            "enforcement_unavailable": "warning",
+        }
+        for state, restored_state in expected.items():
+            with self.subTest(state=state):
+                engine = in_state(state)
+                snapshot_civil = (
+                    datetime(2026, 8, 17, 8, 0)
+                    if state == "dormant"
+                    else civil_now
+                )
+                restored = Engine.restore(
+                    engine.snapshot(engine.last_at, snapshot_civil),
+                    1000,
+                    snapshot_civil,
+                )
+
+                status = restored.status(1000, snapshot_civil)
+                self.assertEqual(status["state"], restored_state)
+                self.assertEqual(
+                    status["upcoming_break"],
+                    state in Engine.UPCOMING_BREAK_STATES or state == "pause",
+                )
 
     def test_warning_deadline_is_based_on_when_active_use_became_due(self):
         engine = Engine(Config(), now=0)

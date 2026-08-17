@@ -9,6 +9,18 @@ from omookaway import cli
 
 
 class ShellCommandContractTest(unittest.TestCase):
+    def test_shell_restart_only_reads_authoritative_status(self):
+        widget = (
+            Path(__file__).parents[1]
+            / "integrations"
+            / "omarchy-shell"
+            / "BarWidget.qml"
+        ).read_text()
+
+        self.assertIn("FileView", widget)
+        self.assertIn("watchChanges: true", widget)
+        self.assertNotIn("active_elapsed_seconds =", widget)
+
     def test_activity_observer_uses_the_published_idle_threshold(self):
         observer = (
             Path(__file__).parents[1] / "integrations" / "activity" / "shell.qml"

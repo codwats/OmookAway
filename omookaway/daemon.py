@@ -28,8 +28,15 @@ class StateFiles:
     def load(self, now: float, civil_now: datetime | None = None) -> Engine:
         try:
             return Engine.restore(json.loads(self.state_path.read_text()), now, civil_now)
-        except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        except FileNotFoundError:
             return Engine(Config(), now, civil_now)
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            engine = Engine(Config(), now, civil_now)
+            engine.state_error = (
+                f"Could not restore saved state at {self.state_path}: {error}. "
+                "Check or remove that file, then restart OmookAway."
+            )
+            return engine
 
     def publish(self, engine: Engine, now: float, civil_now: datetime | None = None) -> None:
         self._write(self.state_path, engine.snapshot(now, civil_now), private=True)
@@ -84,6 +91,13 @@ class Daemon:
             elif effect.get("type") == "release_break":
                 await self.overlay.release()
 
+    async def restore_effects(self) -> None:
+        now = elapsed_time()
+        civil_now = datetime.now().astimezone()
+        response = self.engine.apply({"type": "time"}, now, civil_now)
+        self.files.publish(self.engine, now, civil_now)
+        await self.dispatch_effects(response)
+
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             request = json.loads((await reader.readline()).decode())
@@ -118,7 +132,7 @@ class Daemon:
     async def run(self) -> None:
         self.socket_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.socket_path.unlink(missing_ok=True)
-        self.files.publish(self.engine, elapsed_time(), datetime.now().astimezone())
+        await self.restore_effects()
         server = await asyncio.start_unix_server(self.handle, path=self.socket_path)
         os.chmod(self.socket_path, 0o600)
         try:

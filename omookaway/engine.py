@@ -140,6 +140,7 @@ class Engine:
         self.consecutive_enforcement_failures = 0
         self.activity_observation_available = False
         self.degraded_wall_clock_mode = False
+        self.state_error: str | None = None
 
     def apply(
         self, event: dict[str, Any], now: float, civil_now: datetime | None = None
@@ -546,6 +547,8 @@ class Engine:
                 result["permitted_commands"].append("enter_degraded_wall_clock_mode")
         if self.degraded_wall_clock_mode:
             result["permitted_commands"].append("leave_degraded_wall_clock_mode")
+        if self.state_error is not None:
+            result["state_error"] = self.state_error
         return result
 
     def snapshot(
@@ -555,10 +558,8 @@ class Engine:
             "version": 1,
             "config": asdict(self.config),
             "state": self.state,
-            "active": self.active,
-            "input_active": self.input_active,
             "active_elapsed_seconds": self.active_elapsed,
-            "away_sources": sorted(self.away_sources),
+            "away": bool(self.away_sources),
             "away_started_civil": (
                 self.away_started_civil.isoformat()
                 if self.away_started_civil is not None
@@ -591,7 +592,6 @@ class Engine:
             "count_date": self.count_date,
             "enforcement_error": self.enforcement_error,
             "consecutive_enforcement_failures": self.consecutive_enforcement_failures,
-            "activity_observation_available": self.activity_observation_available,
             "work_hours_window": self.window,
         }
 
@@ -610,10 +610,10 @@ class Engine:
         if state not in cls.STATES:
             raise ValueError("invalid lifecycle state")
         engine.state = state
-        engine.active = snapshot["active"] is True
-        engine.input_active = snapshot.get("input_active", engine.active) is True
+        engine.active = False
+        engine.input_active = False
         engine.active_elapsed = float(snapshot["active_elapsed_seconds"])
-        engine.away_sources = set(snapshot.get("away_sources", ()))
+        engine.away_sources = {"idle"} if snapshot.get("away") is True else set()
         away_started_civil = snapshot.get("away_started_civil")
         engine.away_started_civil = (
             datetime.fromisoformat(away_started_civil)
@@ -661,7 +661,6 @@ class Engine:
         )
         engine.activity_observation_available = False
         engine.degraded_wall_clock_mode = False
-        engine.consecutive_enforcement_failures = 0
         if engine.state in {"starting_break", "break", "enforcement_unavailable"}:
             engine.state = "warning"
             engine.warning_deadline = now

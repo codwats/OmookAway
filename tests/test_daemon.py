@@ -81,9 +81,56 @@ class StateFilesTest(unittest.TestCase):
             restored = files.load(now=0)
 
             self.assertEqual(restored.status(now=0)["state"], "activity_unavailable")
+            self.assertIn("saved state", restored.status(now=0)["state_error"])
+
+    def test_persisted_state_contains_only_cadence_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = StateFiles(root / "state.json", root / "status.json")
+            engine = Engine(Config(), now=0)
+
+            files.publish(engine, now=0)
+
+            persisted = json.loads((root / "state.json").read_text())
+            forbidden = {
+                "active", "input_active", "away_sources",
+                "activity_observation_available", "raw_inputs", "activity_timeline",
+                "application", "window", "calendar", "meeting", "microphone",
+                "telemetry", "history",
+            }
+            self.assertTrue(forbidden.isdisjoint(persisted))
+            self.assertEqual(persisted["version"], 1)
+
+    def test_invalid_persisted_values_fail_safe_with_actionable_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = StateFiles(root / "state.json", root / "status.json")
+            (root / "state.json").write_text(json.dumps({"version": 1, "config": {}}))
+
+            restored = files.load(now=0)
+
+            status = restored.status(now=0)
+            self.assertEqual(status["state"], "activity_unavailable")
+            self.assertIn(str(root / "state.json"), status["state_error"])
 
 
 class DaemonOverlayContractTest(unittest.IsolatedAsyncioTestCase):
+    async def test_daemon_restart_relaunches_an_owed_break_overlay(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = StateFiles(root / "state.json", root / "status.json")
+            engine = Engine(Config(work_interval_seconds=1, warning_seconds=1), now=0)
+            engine.apply({"type": "activity", "active": True}, now=0)
+            engine.apply({"type": "time"}, now=2)
+            files.publish(engine, now=2)
+            overlay = AsyncMock()
+            daemon = Daemon(root / "engine.sock", files, overlay=overlay)
+
+            await daemon.restore_effects()
+
+            overlay.launch.assert_awaited_once_with()
+            self.assertEqual(daemon.engine.status(daemon.engine.last_at)["state"], "starting_break")
+
     async def test_runtime_observer_loss_publishes_authoritative_dormant_status(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -188,6 +235,12 @@ class DaemonOverlayContractTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(status["upcoming_break"])
             self.assertEqual(status["enforcement_error"], "process crashed")
             overlay.release.assert_awaited_once_with()
+
+            retry = daemon.engine.apply(
+                {"type": "time"}, now=daemon.engine.last_at
+            )
+            await daemon.dispatch_effects(retry)
+            overlay.launch.assert_awaited_once_with()
 
     async def test_display_disconnect_and_hotplug_release_partial_coverage(self):
         for error in ("display disconnected", "display topology changed"):
