@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .engine import Config, Engine
+from .overlay import OverlayProcess
 
 
 def xdg_path(variable: str, fallback: str, name: str) -> Path:
@@ -46,10 +47,33 @@ class StateFiles:
 
 
 class Daemon:
-    def __init__(self, socket_path: Path, files: StateFiles) -> None:
+    def __init__(
+        self, socket_path: Path, files: StateFiles, overlay: OverlayProcess | None = None
+    ) -> None:
         self.socket_path = socket_path
         self.files = files
         self.engine = files.load(time.monotonic(), datetime.now().astimezone())
+        self.overlay = overlay or OverlayProcess(
+            Path(__file__).with_name("break_overlay.qml"), self.overlay_failed
+        )
+
+    async def overlay_failed(self, error: str) -> None:
+        if self.engine.state not in {"starting_break", "break"}:
+            return
+        now = time.monotonic()
+        civil_now = datetime.now().astimezone()
+        self.engine.apply({"type": "overlay_failed", "error": error}, now, civil_now)
+        self.files.publish(self.engine, now, civil_now)
+
+    async def dispatch_effects(self, response: dict[str, Any]) -> None:
+        for effect in response.get("requested_effects", ()):
+            if effect.get("type") == "launch_break":
+                try:
+                    await self.overlay.launch()
+                except OSError as error:
+                    await self.overlay_failed(str(error))
+            elif effect.get("type") == "release_break":
+                await self.overlay.release()
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -61,6 +85,7 @@ class Daemon:
             else:
                 response = self.engine.apply(request, now, civil_now)
                 self.files.publish(self.engine, now, civil_now)
+                await self.dispatch_effects(response)
             writer.write((json.dumps(response, separators=(",", ":")) + "\n").encode())
             await writer.drain()
         except (ValueError, json.JSONDecodeError) as error:
@@ -75,7 +100,9 @@ class Daemon:
             now = time.monotonic()
             civil_now = datetime.now().astimezone()
             self.engine.apply({"type": "time"}, now, civil_now)
+            response = self.engine.status(now, civil_now)
             self.files.publish(self.engine, now, civil_now)
+            await self.dispatch_effects(response)
 
     async def run(self) -> None:
         self.socket_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -87,6 +114,7 @@ class Daemon:
             async with server:
                 await asyncio.gather(server.serve_forever(), self.tick())
         finally:
+            await self.overlay.release()
             self.socket_path.unlink(missing_ok=True)
 
 

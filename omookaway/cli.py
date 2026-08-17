@@ -25,11 +25,32 @@ def main() -> None:
     activity.add_argument("state", choices=("active", "idle"))
     configure = subparsers.add_parser("configure")
     configure.add_argument("file", type=Path)
+    ready = subparsers.add_parser("overlay-ready")
+    ready.add_argument("display_ids")
+    ready.add_argument("covered_display_ids")
+    ready.add_argument("input_inhibited", choices=("true", "false"))
+    failed = subparsers.add_parser("overlay-failed")
+    failed.add_argument("error")
+    subparsers.add_parser("finish-break")
+    subparsers.add_parser("retry-enforcement")
     args = parser.parse_args()
     if args.command == "status":
         message = {"type": "status"}
     elif args.command == "activity":
         message = {"type": "activity", "active": args.state == "active"}
+    elif args.command == "overlay-ready":
+        message = {
+            "type": "overlay_ready",
+            "display_ids": json.loads(args.display_ids),
+            "covered_display_ids": json.loads(args.covered_display_ids),
+            "input_inhibited": args.input_inhibited == "true",
+        }
+    elif args.command == "overlay-failed":
+        message = {"type": "overlay_failed", "error": args.error}
+    elif args.command == "finish-break":
+        message = {"type": "finish_break"}
+    elif args.command == "retry-enforcement":
+        message = {"type": "retry_enforcement"}
     else:
         message = {"type": "configure", "config": json.loads(args.file.read_text())}
     print(json.dumps(asyncio.run(request(message)), indent=2))

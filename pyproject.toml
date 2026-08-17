@@ -14,3 +14,6 @@ omookawayd = "omookaway.daemon:main"
 
 [tool.setuptools]
 packages = ["omookaway"]
+
+[tool.setuptools.package-data]
+omookaway = ["break_overlay.qml"]

@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
-from omookaway.daemon import StateFiles
+from omookaway.daemon import Daemon, StateFiles
 from omookaway.engine import Config, Engine
 
 
@@ -69,6 +69,49 @@ class StateFilesTest(unittest.TestCase):
             restored = files.load(now=0)
 
             self.assertEqual(restored.status(now=0)["state"], "idle")
+
+
+class DaemonOverlayContractTest(unittest.IsolatedAsyncioTestCase):
+    async def test_process_launch_failure_returns_to_an_owed_warning(self):
+        class FailedOverlay:
+            async def launch(self):
+                raise OSError("quickshell unavailable")
+
+            async def release(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = StateFiles(root / "state.json", root / "status.json")
+            daemon = Daemon(root / "engine.sock", files, overlay=FailedOverlay())
+            daemon.engine = Engine(Config(work_interval_seconds=1, warning_seconds=1), 0)
+            daemon.engine.apply({"type": "activity", "active": True}, 0)
+            requested = daemon.engine.apply({"type": "time"}, 2)
+
+            await daemon.dispatch_effects(requested)
+
+            status = daemon.engine.status(2)
+            self.assertEqual(status["state"], "warning")
+            self.assertTrue(status["upcoming_break"])
+            self.assertIn("quickshell unavailable", status["enforcement_error"])
+
+    async def test_overlay_process_exit_fails_open_through_the_engine_seam(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = StateFiles(root / "state.json", root / "status.json")
+            daemon = Daemon(root / "engine.sock", files, overlay=object())
+            daemon.engine = Engine(
+                Config(work_interval_seconds=1, warning_seconds=1), now=0
+            )
+            daemon.engine.apply({"type": "activity", "active": True}, now=0)
+            daemon.engine.apply({"type": "time"}, now=2)
+
+            await daemon.overlay_failed("process crashed")
+
+            status = json.loads((root / "status.json").read_text())
+            self.assertEqual(status["state"], "warning")
+            self.assertTrue(status["upcoming_break"])
+            self.assertEqual(status["enforcement_error"], "process crashed")
 
 
 if __name__ == "__main__":

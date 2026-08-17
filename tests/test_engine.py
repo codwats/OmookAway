@@ -5,6 +5,213 @@ from omookaway.engine import Config, Engine
 
 
 class EngineAcceptanceTest(unittest.TestCase):
+    def test_warning_expiry_requests_a_break_without_starting_it(self):
+        engine = Engine(
+            Config(work_interval_seconds=60, warning_seconds=20, break_seconds=100),
+            now=0,
+        )
+        engine.apply({"type": "activity", "active": True}, now=0)
+        engine.apply({"type": "time"}, now=60)
+
+        requested = engine.apply({"type": "time"}, now=80)
+
+        self.assertEqual(requested["state"], "starting_break")
+        self.assertTrue(requested["upcoming_break"])
+        self.assertEqual(requested["requested_effects"], [{"type": "launch_break"}])
+        self.assertNotIn("break_remaining_seconds", requested)
+
+    def test_break_starts_only_after_complete_coverage_and_input_inhibition(self):
+        engine = Engine(
+            Config(work_interval_seconds=60, warning_seconds=20, break_seconds=100),
+            now=0,
+        )
+        engine.apply({"type": "activity", "active": True}, now=0)
+        engine.apply({"type": "time"}, now=80)
+
+        incomplete = engine.apply(
+            {
+                "type": "overlay_ready",
+                "display_ids": ["left", "right"],
+                "covered_display_ids": ["left"],
+                "input_inhibited": True,
+            },
+            now=81,
+        )
+
+        self.assertEqual(incomplete["state"], "warning")
+        self.assertTrue(incomplete["upcoming_break"])
+        self.assertEqual(incomplete["requested_effects"], [{"type": "release_break"}])
+
+        engine.apply({"type": "time"}, now=101)
+        started = engine.apply(
+            {
+                "type": "overlay_ready",
+                "display_ids": ["left", "right"],
+                "covered_display_ids": ["right", "left"],
+                "input_inhibited": True,
+            },
+            now=102,
+        )
+
+        self.assertEqual(started["state"], "break")
+        self.assertEqual(started["break_remaining_seconds"], 100)
+        self.assertEqual(started["permitted_commands"], ["finish_break"])
+
+    def test_break_control_classifies_outcome_at_twenty_percent(self):
+        def breaking_engine() -> Engine:
+            engine = Engine(
+                Config(work_interval_seconds=60, warning_seconds=20, break_seconds=100),
+                now=0,
+            )
+            engine.apply({"type": "activity", "active": True}, now=0)
+            engine.apply({"type": "time"}, now=80)
+            engine.apply(
+                {
+                    "type": "overlay_ready",
+                    "display_ids": ["display"],
+                    "covered_display_ids": ["display"],
+                    "input_inhibited": True,
+                },
+                now=80,
+            )
+            return engine
+
+        aborted = breaking_engine().apply({"type": "finish_break"}, now=99.999)
+        satisfied = breaking_engine().apply({"type": "finish_break"}, now=100)
+
+        self.assertEqual(aborted["last_break_outcome"], "aborted")
+        self.assertEqual(aborted["today_aborted_breaks"], 1)
+        self.assertEqual(aborted["today_satisfied_breaks"], 0)
+        self.assertEqual(satisfied["last_break_outcome"], "satisfied")
+        self.assertEqual(satisfied["today_satisfied_breaks"], 1)
+        self.assertEqual(satisfied["requested_effects"], [{"type": "release_break"}])
+        self.assertEqual(satisfied["state"], "work_interval")
+        self.assertEqual(satisfied["active_elapsed_seconds"], 0)
+
+    def test_break_timer_expiry_is_satisfied_and_waits_for_active_use_if_idle(self):
+        engine = Engine(
+            Config(work_interval_seconds=60, warning_seconds=20, break_seconds=100),
+            now=0,
+        )
+        engine.apply({"type": "activity", "active": True}, now=0)
+        engine.apply({"type": "time"}, now=80)
+        engine.apply(
+            {
+                "type": "overlay_ready",
+                "display_ids": ["display"],
+                "covered_display_ids": ["display"],
+                "input_inhibited": True,
+            },
+            now=80,
+        )
+        engine.apply({"type": "activity", "active": False}, now=100)
+
+        finished = engine.apply({"type": "time"}, now=180)
+
+        self.assertEqual(finished["last_break_outcome"], "satisfied")
+        self.assertEqual(finished["state"], "idle")
+        self.assertFalse(finished["upcoming_break"])
+        resumed = engine.apply({"type": "activity", "active": True}, now=181)
+        self.assertEqual(resumed["state"], "work_interval")
+        self.assertEqual(resumed["active_elapsed_seconds"], 0)
+
+    def test_active_break_revalidates_display_coverage_and_fails_open(self):
+        engine = self._start_break()
+
+        failed = engine.apply(
+            {
+                "type": "overlay_ready",
+                "display_ids": ["left", "right"],
+                "covered_display_ids": ["left"],
+                "input_inhibited": True,
+            },
+            now=81,
+        )
+
+        self.assertEqual(failed["state"], "warning")
+        self.assertEqual(failed["consecutive_enforcement_failures"], 1)
+        self.assertEqual(failed["requested_effects"], [{"type": "release_break"}])
+
+    def test_second_enforcement_failure_stops_until_explicit_retry(self):
+        engine = Engine(
+            Config(work_interval_seconds=60, warning_seconds=20), now=0
+        )
+        engine.apply({"type": "activity", "active": True}, now=0)
+        engine.apply({"type": "time"}, now=80)
+        first = engine.apply({"type": "overlay_failed", "error": "not ready"}, now=81)
+        retry = engine.apply({"type": "time"}, now=81)
+        second = engine.apply({"type": "overlay_failed", "error": "crashed"}, now=82)
+
+        self.assertEqual(first["state"], "warning")
+        self.assertEqual(retry["state"], "starting_break")
+        self.assertEqual(retry["requested_effects"], [{"type": "launch_break"}])
+        self.assertEqual(second["state"], "enforcement_unavailable")
+        self.assertTrue(second["upcoming_break"])
+        self.assertEqual(second["permitted_commands"], ["retry_enforcement"])
+
+        requested = engine.apply({"type": "retry_enforcement"}, now=83)
+        self.assertEqual(requested["state"], "starting_break")
+        self.assertEqual(requested["requested_effects"], [{"type": "launch_break"}])
+
+    def test_daemon_restart_clears_enforcement_unavailable_for_one_fresh_attempt(self):
+        engine = Engine(Config(work_interval_seconds=1, warning_seconds=1), now=0)
+        engine.apply({"type": "activity", "active": True}, now=0)
+        engine.apply({"type": "time"}, now=2)
+        engine.apply({"type": "overlay_failed"}, now=3)
+        engine.apply({"type": "time"}, now=3)
+        unavailable = engine.apply({"type": "overlay_failed"}, now=4)
+        self.assertEqual(unavailable["state"], "enforcement_unavailable")
+
+        restored = Engine.restore(engine.snapshot(4), now=100)
+        retried = restored.apply({"type": "time"}, now=100)
+
+        self.assertEqual(retried["state"], "starting_break")
+        self.assertEqual(retried["consecutive_enforcement_failures"], 0)
+        self.assertEqual(retried["requested_effects"], [{"type": "launch_break"}])
+
+    def test_daemon_restart_revalidates_an_active_break_before_enforcing(self):
+        engine = self._start_break()
+
+        restored = Engine.restore(engine.snapshot(81), now=100)
+        status = restored.status(100)
+
+        self.assertEqual(status["state"], "warning")
+        self.assertTrue(status["upcoming_break"])
+        self.assertNotIn("break_remaining_seconds", status)
+        retried = restored.apply({"type": "time"}, now=100)
+        self.assertEqual(retried["state"], "starting_break")
+        self.assertEqual(retried["requested_effects"], [{"type": "launch_break"}])
+
+    def test_daemon_restart_clears_a_single_enforcement_failure(self):
+        engine = Engine(Config(work_interval_seconds=1, warning_seconds=1), now=0)
+        engine.apply({"type": "activity", "active": True}, now=0)
+        engine.apply({"type": "time"}, now=2)
+        failed = engine.apply({"type": "overlay_failed"}, now=3)
+        self.assertEqual(failed["consecutive_enforcement_failures"], 1)
+
+        restored = Engine.restore(engine.snapshot(3), now=100)
+
+        self.assertEqual(restored.status(100)["consecutive_enforcement_failures"], 0)
+
+    @staticmethod
+    def _start_break() -> Engine:
+        engine = Engine(
+            Config(work_interval_seconds=60, warning_seconds=20, break_seconds=100),
+            now=0,
+        )
+        engine.apply({"type": "activity", "active": True}, now=0)
+        engine.apply({"type": "time"}, now=80)
+        engine.apply(
+            {
+                "type": "overlay_ready",
+                "display_ids": ["left"],
+                "covered_display_ids": ["left"],
+                "input_inhibited": True,
+            },
+            now=80,
+        )
+        return engine
+
     def test_progress_advances_only_inside_current_work_hours_window(self):
         engine = Engine(
             Config(work_hours={"monday": [["09:00", "10:00"]]}),

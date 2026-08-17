@@ -5,6 +5,14 @@ to an Omarchy Shell widget. Idle transitions come from Quickshell's
 `ext-idle-notify-v1` monitor; the integration never receives raw input or
 application context.
 
+When a Warning expires, the daemon starts a separate Quickshell process for the
+Break. Enforcement begins only after Quickshell reports a mapped overlay on
+every current display with its Wayland exclusive-keyboard mode applied.
+Quickshell exposes no separate compositor acknowledgement for that mode. The overlay reports its countdown and
+offers one deliberate End Break control: before 20 percent it records an
+Aborted Break, and at or after 20 percent it records a Satisfied Break. Natural
+timer expiry is also Satisfied.
+
 ## Run from a checkout
 
 ```sh
