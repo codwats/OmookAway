@@ -40,6 +40,13 @@ ShellRoot {
       covered.push(window.modelData.name)
     }
     var topology = JSON.stringify(displays)
+    if (readinessSent && topology !== lastTopology) {
+      if (!failureSent &&
+          send(["omookaway", "overlay-failed", "display topology changed"])) {
+        failureSent = true
+      }
+      return
+    }
     if (healthy && JSON.stringify(covered.sort()) === topology) {
       unhealthySince = 0
       if ((!readinessSent || topology !== lastTopology) &&

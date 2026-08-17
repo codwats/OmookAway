@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from omookaway.daemon import Daemon, StateFiles
 from omookaway.engine import Config, Engine
@@ -174,6 +174,21 @@ class DaemonOverlayContractTest(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(status["upcoming_break"])
                 self.assertEqual(status["enforcement_error"], error)
                 overlay.release.assert_awaited_once_with()
+
+    async def test_overlay_failure_releases_even_when_status_cannot_be_published(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = StateFiles(root / "state.json", root / "status.json")
+            overlay = AsyncMock()
+            daemon = Daemon(root / "engine.sock", files, overlay=overlay)
+            daemon.engine = Engine(Config(), now=0)
+            daemon.engine.apply({"type": "start_manual_break"}, now=0)
+            files.publish = Mock(side_effect=OSError("disk full"))
+
+            with self.assertRaisesRegex(OSError, "disk full"):
+                await daemon.overlay_failed("display disconnected")
+
+            overlay.release.assert_awaited_once_with()
 
 
 if __name__ == "__main__":

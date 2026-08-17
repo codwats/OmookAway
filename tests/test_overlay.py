@@ -25,6 +25,12 @@ class OverlayProcessContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"overlay-failed"', source)
         self.assertIn("readinessTimeout", source)
 
+    def test_qml_fails_open_when_a_display_disconnects_or_is_hot_plugged(self):
+        source = (Path(__file__).parents[1] / "omookaway" / "break_overlay.qml").read_text()
+
+        self.assertIn("readinessSent && topology !== lastTopology", source)
+        self.assertIn("display topology changed", source)
+
     async def test_launch_uses_a_dedicated_quickshell_process(self):
         process = FakeProcess()
         spawn = AsyncMock(return_value=process)

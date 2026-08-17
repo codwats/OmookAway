@@ -69,8 +69,10 @@ class Daemon:
         response = self.engine.apply(
             {"type": "overlay_failed", "error": error}, now, civil_now
         )
-        self.files.publish(self.engine, now, civil_now)
-        await self.dispatch_effects(response)
+        try:
+            await self.dispatch_effects(response)
+        finally:
+            self.files.publish(self.engine, now, civil_now)
 
     async def dispatch_effects(self, response: dict[str, Any]) -> None:
         for effect in response.get("requested_effects", ()):
