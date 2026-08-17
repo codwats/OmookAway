@@ -31,6 +31,7 @@ def main() -> None:
     ready.add_argument("input_inhibited", choices=("true", "false"))
     failed = subparsers.add_parser("overlay-failed")
     failed.add_argument("error")
+    subparsers.add_parser("start-break")
     subparsers.add_parser("finish-break")
     subparsers.add_parser("retry-enforcement")
     args = parser.parse_args()
@@ -47,6 +48,8 @@ def main() -> None:
         }
     elif args.command == "overlay-failed":
         message = {"type": "overlay_failed", "error": args.error}
+    elif args.command == "start-break":
+        message = {"type": "start_manual_break"}
     elif args.command == "finish-break":
         message = {"type": "finish_break"}
     elif args.command == "retry-enforcement":

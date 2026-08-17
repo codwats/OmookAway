@@ -163,6 +163,11 @@ class Engine:
             self.state = "starting_break"
             self.enforcement_error = None
             self.requested_effects.append({"type": "launch_break"})
+        elif event.get("type") == "start_manual_break":
+            if self.state not in {"idle", "work_interval"}:
+                raise ValueError("Manual Break is not available")
+            self.state = "starting_break"
+            self.requested_effects.append({"type": "launch_break"})
         elif event.get("type") == "finish_break":
             if self.state != "break":
                 raise ValueError("no Break is active")
@@ -281,6 +286,8 @@ class Engine:
             result["permitted_commands"] = ["finish_break"]
         elif self.state == "enforcement_unavailable":
             result["permitted_commands"] = ["retry_enforcement"]
+        elif self.state in {"idle", "work_interval"}:
+            result["permitted_commands"] = ["start_manual_break"]
         if self.last_break_outcome is not None:
             result["last_break_outcome"] = self.last_break_outcome
         if self.enforcement_error is not None:

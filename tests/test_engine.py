@@ -5,6 +5,60 @@ from omookaway.engine import Config, Engine
 
 
 class EngineAcceptanceTest(unittest.TestCase):
+    def test_manual_break_is_permitted_during_work_hours_and_launches_immediately(self):
+        engine = Engine(
+            Config(work_interval_seconds=60, warning_seconds=20, break_seconds=100),
+            now=0,
+        )
+
+        idle = engine.status(now=0)
+        requested = engine.apply({"type": "start_manual_break"}, now=10)
+
+        self.assertIn("start_manual_break", idle["permitted_commands"])
+        self.assertEqual(requested["state"], "starting_break")
+        self.assertEqual(requested["requested_effects"], [{"type": "launch_break"}])
+        self.assertNotIn("deadline_in_seconds", requested)
+
+    def test_manual_break_uses_the_established_completion_lifecycle(self):
+        engine = Engine(Config(break_seconds=100), now=0)
+        engine.apply({"type": "activity", "active": True}, now=0)
+        engine.apply({"type": "start_manual_break"}, now=10)
+        engine.apply(
+            {
+                "type": "overlay_ready",
+                "display_ids": ["display"],
+                "covered_display_ids": ["display"],
+                "input_inhibited": True,
+            },
+            now=11,
+        )
+
+        finished = engine.apply({"type": "time"}, now=111)
+
+        self.assertEqual(finished["last_break_outcome"], "satisfied")
+        self.assertEqual(finished["today_satisfied_breaks"], 1)
+        self.assertEqual(finished["state"], "work_interval")
+        self.assertEqual(finished["active_elapsed_seconds"], 0)
+        self.assertEqual(finished["requested_effects"], [{"type": "release_break"}])
+
+    def test_manual_break_is_rejected_outside_work_hours_and_when_one_is_starting(self):
+        monday = datetime(2026, 8, 17, 9, 0)
+        dormant = Engine(
+            Config(work_hours={"monday": [["10:00", "11:00"]]}),
+            now=0,
+            civil_now=monday,
+        )
+        with self.assertRaisesRegex(ValueError, "Manual Break is not available"):
+            dormant.apply({"type": "start_manual_break"}, now=0, civil_now=monday)
+
+        engine = Engine(Config(), now=0)
+        engine.apply({"type": "start_manual_break"}, now=0)
+        with self.assertRaisesRegex(ValueError, "Manual Break is not available"):
+            engine.apply({"type": "start_manual_break"}, now=1)
+
+        self.assertEqual(engine.status(1)["state"], "starting_break")
+        self.assertEqual(engine.status(1)["requested_effects"], [])
+
     def test_warning_expiry_requests_a_break_without_starting_it(self):
         engine = Engine(
             Config(work_interval_seconds=60, warning_seconds=20, break_seconds=100),

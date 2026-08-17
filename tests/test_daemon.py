@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 from omookaway.daemon import Daemon, StateFiles
 from omookaway.engine import Config, Engine
@@ -72,6 +73,43 @@ class StateFilesTest(unittest.TestCase):
 
 
 class DaemonOverlayContractTest(unittest.IsolatedAsyncioTestCase):
+    async def test_rejected_manual_break_returns_the_authoritative_state(self):
+        class Writer:
+            def __init__(self):
+                self.value = b""
+
+            def write(self, value):
+                self.value += value
+
+            async def drain(self):
+                pass
+
+            def close(self):
+                pass
+
+            async def wait_closed(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            daemon = Daemon(
+                root / "engine.sock",
+                StateFiles(root / "state.json", root / "status.json"),
+                overlay=object(),
+            )
+            daemon.engine = Engine(Config(), now=0)
+            daemon.engine.apply({"type": "start_manual_break"}, now=0)
+            reader = AsyncMock()
+            reader.readline.return_value = b'{"type":"start_manual_break"}\n'
+            writer = Writer()
+
+            await daemon.handle(reader, writer)
+
+            response = json.loads(writer.value)
+            self.assertEqual(response["error"], "Manual Break is not available")
+            self.assertEqual(response["state"], "starting_break")
+            self.assertEqual(response["permitted_commands"], [])
+
     async def test_process_launch_failure_returns_to_an_owed_warning(self):
         class FailedOverlay:
             async def launch(self):

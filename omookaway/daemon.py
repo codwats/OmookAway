@@ -89,7 +89,9 @@ class Daemon:
             writer.write((json.dumps(response, separators=(",", ":")) + "\n").encode())
             await writer.drain()
         except (ValueError, json.JSONDecodeError) as error:
-            writer.write((json.dumps({"error": str(error)}) + "\n").encode())
+            response = self.engine.status(time.monotonic(), datetime.now().astimezone())
+            response["error"] = str(error)
+            writer.write((json.dumps(response, separators=(",", ":")) + "\n").encode())
         finally:
             writer.close()
             await writer.wait_closed()

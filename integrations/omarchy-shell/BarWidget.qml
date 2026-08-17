@@ -30,6 +30,11 @@ BarWidget {
     return Math.floor(elapsed / 60) + "/" + Math.floor(total / 60) + "m"
   }
 
+  function canStartManualBreak() {
+    var commands = status.permitted_commands
+    return Array.isArray(commands) && commands.indexOf("start_manual_break") !== -1
+  }
+
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
@@ -50,17 +55,29 @@ BarWidget {
     onTriggered: statusFile.reload()
   }
 
+  Process {
+    id: manualBreakProcess
+    command: ["omookaway", "start-break"]
+    onExited: statusFile.reload()
+  }
+
   WidgetButton {
     id: button
     anchors.fill: parent
     bar: root.bar
     text: root.displayText()
     active: root.status.state === "warning"
-    interactive: false
+    interactive: root.canStartManualBreak() && !manualBreakProcess.running
     tooltipText: root.status.state === "dormant"
       ? "Outside Work Hours"
       : root.status.state === "warning"
         ? "Upcoming Break is owed"
-        : "Active Work Interval progress"
+        : root.canStartManualBreak()
+          ? "Start a Manual Break"
+          : "Active Work Interval progress"
+    onPressed: function(mouseButton) {
+      if (mouseButton === Qt.LeftButton && root.canStartManualBreak() && !manualBreakProcess.running)
+        manualBreakProcess.running = true
+    }
   }
 }

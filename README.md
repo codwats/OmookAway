@@ -36,6 +36,9 @@ Inspect the same authoritative status used by the widget with:
 omookaway status
 ```
 
+During Work Hours, select the Shell widget or run `omookaway start-break` to
+start a Manual Break immediately.
+
 ## Configure Work Hours
 
 Configuration updates are atomic. Each window stays within one day; adjacent
