@@ -20,18 +20,7 @@ class EngineAcceptanceTest(unittest.TestCase):
         self.assertNotIn("deadline_in_seconds", requested)
 
     def test_manual_break_uses_the_established_completion_lifecycle(self):
-        engine = Engine(Config(break_seconds=100), now=0)
-        engine.apply({"type": "activity", "active": True}, now=0)
-        engine.apply({"type": "start_manual_break"}, now=10)
-        engine.apply(
-            {
-                "type": "overlay_ready",
-                "display_ids": ["display"],
-                "covered_display_ids": ["display"],
-                "input_inhibited": True,
-            },
-            now=11,
-        )
+        engine = self._start_manual_break(overlay_ready_at=11)
 
         finished = engine.apply({"type": "time"}, now=111)
 
@@ -42,23 +31,10 @@ class EngineAcceptanceTest(unittest.TestCase):
         self.assertEqual(finished["requested_effects"], [{"type": "release_break"}])
 
     def test_manual_break_control_supports_satisfied_and_aborted_outcomes(self):
-        def manual_break() -> Engine:
-            engine = Engine(Config(break_seconds=100), now=0)
-            engine.apply({"type": "activity", "active": True}, now=0)
-            engine.apply({"type": "start_manual_break"}, now=10)
-            engine.apply(
-                {
-                    "type": "overlay_ready",
-                    "display_ids": ["display"],
-                    "covered_display_ids": ["display"],
-                    "input_inhibited": True,
-                },
-                now=10,
-            )
-            return engine
-
-        aborted = manual_break().apply({"type": "finish_break"}, now=29.999)
-        satisfied = manual_break().apply({"type": "finish_break"}, now=30)
+        aborted = self._start_manual_break().apply(
+            {"type": "finish_break"}, now=29.999
+        )
+        satisfied = self._start_manual_break().apply({"type": "finish_break"}, now=30)
 
         self.assertEqual(aborted["last_break_outcome"], "aborted")
         self.assertEqual(aborted["today_aborted_breaks"], 1)
@@ -272,6 +248,22 @@ class EngineAcceptanceTest(unittest.TestCase):
         restored = Engine.restore(engine.snapshot(3), now=100)
 
         self.assertEqual(restored.status(100)["consecutive_enforcement_failures"], 0)
+
+    @staticmethod
+    def _start_manual_break(overlay_ready_at: float = 10) -> Engine:
+        engine = Engine(Config(break_seconds=100), now=0)
+        engine.apply({"type": "activity", "active": True}, now=0)
+        engine.apply({"type": "start_manual_break"}, now=10)
+        engine.apply(
+            {
+                "type": "overlay_ready",
+                "display_ids": ["display"],
+                "covered_display_ids": ["display"],
+                "input_inhibited": True,
+            },
+            now=overlay_ready_at,
+        )
+        return engine
 
     @staticmethod
     def _start_break() -> Engine:
