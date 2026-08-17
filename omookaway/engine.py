@@ -96,6 +96,7 @@ class Engine:
         "work_interval",
         "warning",
         "snooze",
+        "pause",
         "starting_break",
         "break",
         "enforcement_unavailable",
@@ -117,6 +118,8 @@ class Engine:
         self.last_at = now
         self.warning_deadline: float | None = None
         self.snooze_deadline: float | None = None
+        self.pause_deadline: datetime | None = None
+        self.paused_upcoming_break = False
         self.snoozes_remaining: int | None = None
         self.upcoming_break_snooze_seconds: int | None = None
         self.break_started_at: float | None = None
@@ -144,6 +147,12 @@ class Engine:
             self.last_at = now
         else:
             self._advance(now)
+        if (
+            self.state == "pause"
+            and self.pause_deadline is not None
+            and civil_now >= self.pause_deadline
+        ):
+            self._resume(now)
         if new_config is not None:
             old_warning_seconds = self.config.warning_seconds
             self.config = new_config
@@ -162,6 +171,8 @@ class Engine:
             self.active = event.get("active") is True
             if self.window is None:
                 self.state = "dormant"
+            elif self.state == "pause":
+                pass
             elif self.state not in self.UPCOMING_BREAK_STATES:
                 self.state = "work_interval" if self.active else "idle"
         elif event.get("type") == "overlay_ready":
@@ -198,6 +209,28 @@ class Engine:
             assert self.upcoming_break_snooze_seconds is not None
             self.warning_deadline = None
             self.snooze_deadline = now + self.upcoming_break_snooze_seconds
+        elif event.get("type") == "pause":
+            try:
+                resume_at = datetime.fromisoformat(event["resume_at"])
+                if civil_now.tzinfo is not None and resume_at.tzinfo is None:
+                    resume_at = resume_at.replace(tzinfo=civil_now.tzinfo)
+                elif civil_now.tzinfo is None and resume_at.tzinfo is not None:
+                    resume_at = resume_at.replace(tzinfo=None)
+            except (KeyError, TypeError, ValueError):
+                raise ValueError("Pause requires a valid future resume time") from None
+            if resume_at <= civil_now:
+                raise ValueError("Pause requires a valid future resume time")
+            if self.state not in {"work_interval", "warning", "snooze"}:
+                raise ValueError("Pause is not available")
+            self.paused_upcoming_break = self.state in {"warning", "snooze"}
+            self.state = "pause"
+            self.pause_deadline = resume_at
+            self.warning_deadline = None
+            self.snooze_deadline = None
+        elif event.get("type") == "resume":
+            if self.state != "pause":
+                raise ValueError("Resume is not available")
+            self._resume(now)
         elif event.get("type") == "start_manual_break":
             if self.state not in {"idle", "work_interval"}:
                 raise ValueError("Manual Break is not available")
@@ -247,6 +280,16 @@ class Engine:
                 self._finish_break("satisfied")
         self.last_at = now
 
+    def _resume(self, now: float) -> None:
+        if self.paused_upcoming_break:
+            self.state = "warning"
+            self.warning_deadline = now + self.config.warning_seconds
+        else:
+            self.state = "work_interval" if self.active else "idle"
+        self.pause_deadline = None
+        self.paused_upcoming_break = False
+        self.last_at = now
+
     def _finish_break(self, outcome: str) -> None:
         self.last_break_outcome = outcome
         if outcome == "satisfied":
@@ -256,6 +299,8 @@ class Engine:
         self.active_elapsed = 0.0
         self.warning_deadline = None
         self.snooze_deadline = None
+        self.pause_deadline = None
+        self.paused_upcoming_break = False
         self.snoozes_remaining = None
         self.upcoming_break_snooze_seconds = None
         self.break_started_at = None
@@ -299,6 +344,8 @@ class Engine:
         self.active_elapsed = 0.0
         self.warning_deadline = None
         self.snooze_deadline = None
+        self.pause_deadline = None
+        self.paused_upcoming_break = False
         self.snoozes_remaining = None
         self.upcoming_break_snooze_seconds = None
         self.break_started_at = None
@@ -316,13 +363,20 @@ class Engine:
         self._reconcile_count_date(civil_now)
         if self._reconcile_window(civil_now):
             self.last_at = now
+        elif (
+            self.state == "pause"
+            and self.pause_deadline is not None
+            and civil_now >= self.pause_deadline
+        ):
+            self._resume(now)
         elapsed = min(self.active_elapsed, self.config.work_interval_seconds)
         result: dict[str, Any] = {
             "state": self.state,
             "work_interval_seconds": self.config.work_interval_seconds,
             "active_elapsed_seconds": round(elapsed, 3),
             "progress": elapsed / self.config.work_interval_seconds,
-            "upcoming_break": self.state in self.UPCOMING_BREAK_STATES,
+            "upcoming_break": self.state in self.UPCOMING_BREAK_STATES
+            or self.state == "pause" and self.paused_upcoming_break,
             "permitted_commands": [],
             "requested_effects": list(self.requested_effects),
             "today_satisfied_breaks": self.today_satisfied_breaks,
@@ -338,11 +392,21 @@ class Engine:
         if self.state == "break":
             result["permitted_commands"] = ["finish_break"]
         elif self.state == "warning" and self.snoozes_remaining:
-            result["permitted_commands"] = ["snooze"]
+            result["permitted_commands"] = ["snooze", "pause"]
+        elif self.state == "warning":
+            result["permitted_commands"] = ["pause"]
+        elif self.state == "snooze":
+            result["permitted_commands"] = ["pause"]
+        elif self.state == "pause":
+            result["permitted_commands"] = ["resume"]
         elif self.state == "enforcement_unavailable":
             result["permitted_commands"] = ["retry_enforcement"]
         elif self.state in {"idle", "work_interval"}:
             result["permitted_commands"] = ["start_manual_break"]
+            if self.state == "work_interval":
+                result["permitted_commands"].append("pause")
+        if self.pause_deadline is not None:
+            result["pause_deadline"] = self.pause_deadline.isoformat()
         if self.last_break_outcome is not None:
             result["last_break_outcome"] = self.last_break_outcome
         if result["upcoming_break"]:
@@ -366,6 +430,10 @@ class Engine:
                 if self.snooze_deadline is not None
                 else None
             ),
+            "pause_deadline": (
+                self.pause_deadline.isoformat() if self.pause_deadline is not None else None
+            ),
+            "paused_upcoming_break": self.paused_upcoming_break,
             "snoozes_remaining": self.snoozes_remaining,
             "upcoming_break_snooze_seconds": self.upcoming_break_snooze_seconds,
             "break_started_elapsed_seconds": (
@@ -406,6 +474,11 @@ class Engine:
         engine.snooze_deadline = (
             now + float(snooze_remaining) if snooze_remaining is not None else None
         )
+        pause_deadline = snapshot.get("pause_deadline")
+        engine.pause_deadline = (
+            datetime.fromisoformat(pause_deadline) if pause_deadline is not None else None
+        )
+        engine.paused_upcoming_break = snapshot.get("paused_upcoming_break") is True
         engine.snoozes_remaining = snapshot.get("snoozes_remaining")
         engine.upcoming_break_snooze_seconds = snapshot.get(
             "upcoming_break_snooze_seconds"

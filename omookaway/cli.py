@@ -33,6 +33,9 @@ def main() -> None:
     failed.add_argument("error")
     subparsers.add_parser("start-break")
     subparsers.add_parser("snooze")
+    pause = subparsers.add_parser("pause")
+    pause.add_argument("resume_at")
+    subparsers.add_parser("resume")
     subparsers.add_parser("finish-break")
     subparsers.add_parser("retry-enforcement")
     args = parser.parse_args()
@@ -53,6 +56,10 @@ def main() -> None:
         message = {"type": "start_manual_break"}
     elif args.command == "snooze":
         message = {"type": "snooze"}
+    elif args.command == "pause":
+        message = {"type": "pause", "resume_at": args.resume_at}
+    elif args.command == "resume":
+        message = {"type": "resume"}
     elif args.command == "finish-break":
         message = {"type": "finish_break"}
     elif args.command == "retry-enforcement":

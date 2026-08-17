@@ -42,6 +42,15 @@ start a Manual Break immediately.
 During a Warning, the widget shows the remaining Snooze Budget. Select it or
 run `omookaway snooze` to postpone that Upcoming Break.
 
+Pause an active Work Interval or Upcoming Break until a future ISO-8601 time
+without consuming a Snooze:
+
+```sh
+omookaway pause 2026-08-17T14:30:00-07:00
+```
+
+The widget displays the Pause deadline. Resume early with `omookaway resume`.
+
 ## Configure Work Hours
 
 Configuration updates are atomic. Each window stays within one day; adjacent

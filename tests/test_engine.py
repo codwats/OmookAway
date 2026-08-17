@@ -633,7 +633,7 @@ class EngineAcceptanceTest(unittest.TestCase):
         self.assertEqual(warning["state"], "warning")
         self.assertTrue(warning["upcoming_break"])
         self.assertEqual(warning["deadline_in_seconds"], 20)
-        self.assertEqual(warning["permitted_commands"], ["snooze"])
+        self.assertEqual(warning["permitted_commands"], ["snooze", "pause"])
 
     def test_idle_time_does_not_advance_active_elapsed_time(self):
         engine = Engine(Config(), now=0)
@@ -667,6 +667,206 @@ class EngineAcceptanceTest(unittest.TestCase):
         warning = engine.apply({"type": "time"}, now=1800.5)
 
         self.assertEqual(warning["deadline_in_seconds"], 19.5)
+
+    def test_pause_preserves_work_interval_progress_until_resume(self):
+        started = datetime(2026, 8, 17, 9, 0)
+        engine = Engine(Config(work_interval_seconds=600), now=0, civil_now=started)
+        engine.apply({"type": "activity", "active": True}, now=0, civil_now=started)
+        engine.apply(
+            {"type": "time"}, now=120, civil_now=datetime(2026, 8, 17, 9, 2)
+        )
+
+        paused = engine.apply(
+            {"type": "pause", "resume_at": "2026-08-17T09:12:00"},
+            now=120,
+            civil_now=datetime(2026, 8, 17, 9, 2),
+        )
+        still_paused = engine.apply(
+            {"type": "time"}, now=660, civil_now=datetime(2026, 8, 17, 9, 11)
+        )
+        resumed = engine.apply(
+            {"type": "time"}, now=720, civil_now=datetime(2026, 8, 17, 9, 12)
+        )
+
+        self.assertEqual(paused["state"], "pause")
+        self.assertEqual(paused["active_elapsed_seconds"], 120)
+        self.assertEqual(paused["pause_deadline"], "2026-08-17T09:12:00")
+        self.assertEqual(paused["permitted_commands"], ["resume"])
+        self.assertEqual(still_paused["active_elapsed_seconds"], 120)
+        self.assertEqual(resumed["state"], "work_interval")
+        self.assertEqual(resumed["active_elapsed_seconds"], 120)
+
+    def test_pause_preserves_upcoming_break_and_budget_then_resumes_with_fresh_warning(self):
+        started = datetime(2026, 8, 17, 9, 0)
+        engine = Engine(
+            Config(work_interval_seconds=60, warning_seconds=20, snooze_budget=3),
+            now=0,
+            civil_now=started,
+        )
+        engine.apply({"type": "activity", "active": True}, 0, started)
+        engine.apply({"type": "time"}, 60, datetime(2026, 8, 17, 9, 1))
+        engine.apply({"type": "snooze"}, 65, datetime(2026, 8, 17, 9, 1, 5))
+
+        paused = engine.apply(
+            {"type": "pause", "resume_at": "2026-08-17T09:10:00"},
+            65,
+            datetime(2026, 8, 17, 9, 1, 5),
+        )
+        resumed = engine.apply(
+            {"type": "time"}, 600, datetime(2026, 8, 17, 9, 10)
+        )
+
+        self.assertTrue(paused["upcoming_break"])
+        self.assertEqual(paused["snoozes_remaining"], 2)
+        self.assertEqual(resumed["state"], "warning")
+        self.assertEqual(resumed["deadline_in_seconds"], 20)
+        self.assertEqual(resumed["snoozes_remaining"], 2)
+        self.assertEqual(resumed["permitted_commands"], ["snooze", "pause"])
+
+    def test_pause_rejects_invalid_past_and_unavailable_requests(self):
+        now = datetime(2026, 8, 17, 9, 0)
+        engine = Engine(Config(), 0, now)
+
+        for resume_at in ("not-a-time", "2026-08-17T09:00:00", "2026-08-17T08:59:59"):
+            with self.assertRaisesRegex(ValueError, "future resume time"):
+                engine.apply({"type": "pause", "resume_at": resume_at}, 0, now)
+
+        with self.assertRaisesRegex(ValueError, "Pause is not available"):
+            engine.apply(
+                {"type": "pause", "resume_at": "2026-08-17T10:00:00"}, 0, now
+            )
+
+    def test_work_hours_boundary_discards_a_pause_and_its_preserved_obligation(self):
+        engine = Engine(
+            Config(
+                work_interval_seconds=60,
+                work_hours={"monday": [["09:00", "09:02"], ["09:03", "10:00"]]},
+            ),
+            0,
+            datetime(2026, 8, 17, 9, 0),
+        )
+        engine.apply(
+            {"type": "activity", "active": True}, 0, datetime(2026, 8, 17, 9, 0)
+        )
+        engine.apply({"type": "time"}, 60, datetime(2026, 8, 17, 9, 1))
+        engine.apply(
+            {"type": "pause", "resume_at": "2026-08-17T09:30:00"},
+            60,
+            datetime(2026, 8, 17, 9, 1),
+        )
+
+        dormant = engine.apply(
+            {"type": "time"}, 120, datetime(2026, 8, 17, 9, 2)
+        )
+        fresh = engine.apply(
+            {"type": "time"}, 180, datetime(2026, 8, 17, 9, 3)
+        )
+
+        self.assertEqual(dormant["state"], "dormant")
+        self.assertFalse(dormant["upcoming_break"])
+        self.assertEqual(fresh["state"], "idle")
+        self.assertEqual(fresh["active_elapsed_seconds"], 0)
+
+    def test_activity_changes_do_not_cancel_pause_and_early_resume_uses_latest_activity(self):
+        now = datetime(2026, 8, 17, 9, 0)
+        engine = Engine(Config(), 0, now)
+        engine.apply({"type": "activity", "active": True}, 0, now)
+        engine.apply({"type": "time"}, 60, datetime(2026, 8, 17, 9, 1))
+        engine.apply(
+            {"type": "pause", "resume_at": "2026-08-17T10:00:00"},
+            60,
+            datetime(2026, 8, 17, 9, 1),
+        )
+
+        paused = engine.apply(
+            {"type": "activity", "active": False},
+            120,
+            datetime(2026, 8, 17, 9, 2),
+        )
+        resumed = engine.apply(
+            {"type": "resume"}, 180, datetime(2026, 8, 17, 9, 3)
+        )
+
+        self.assertEqual(paused["state"], "pause")
+        self.assertEqual(paused["active_elapsed_seconds"], 60)
+        self.assertEqual(resumed["state"], "idle")
+        self.assertEqual(resumed["active_elapsed_seconds"], 60)
+
+    def test_pause_survives_daemon_restart_with_its_absolute_deadline(self):
+        now = datetime(2026, 8, 17, 9, 0)
+        engine = Engine(Config(), 0, now)
+        engine.apply({"type": "activity", "active": True}, 0, now)
+        engine.apply(
+            {"type": "pause", "resume_at": "2026-08-17T10:00:00"}, 0, now
+        )
+
+        restored = Engine.restore(
+            engine.snapshot(0), 5000, datetime(2026, 8, 17, 9, 30)
+        )
+        status = restored.status(5000, datetime(2026, 8, 17, 9, 30))
+
+        self.assertEqual(status["state"], "pause")
+        self.assertEqual(status["pause_deadline"], "2026-08-17T10:00:00")
+        self.assertEqual(status["permitted_commands"], ["resume"])
+
+    def test_status_reconciles_an_expired_pause_before_reporting_controls(self):
+        now = datetime(2026, 8, 17, 9, 0)
+        engine = Engine(Config(), 0, now)
+        engine.apply({"type": "activity", "active": True}, 0, now)
+        engine.apply(
+            {"type": "pause", "resume_at": "2026-08-17T09:10:00"}, 0, now
+        )
+
+        status = engine.status(600, datetime(2026, 8, 17, 9, 10))
+
+        self.assertEqual(status["state"], "work_interval")
+        self.assertEqual(status["permitted_commands"], ["start_manual_break", "pause"])
+        self.assertNotIn("pause_deadline", status)
+
+    def test_early_resume_of_upcoming_break_starts_fresh_warning_without_budget_change(self):
+        now = datetime(2026, 8, 17, 9, 0)
+        engine = Engine(
+            Config(work_interval_seconds=60, warning_seconds=20, snooze_budget=3),
+            0,
+            now,
+        )
+        engine.apply({"type": "activity", "active": True}, 0, now)
+        engine.apply({"type": "time"}, 60, datetime(2026, 8, 17, 9, 1))
+        engine.apply(
+            {"type": "pause", "resume_at": "2026-08-17T10:00:00"},
+            60,
+            datetime(2026, 8, 17, 9, 1),
+        )
+
+        resumed = engine.apply(
+            {"type": "resume"}, 120, datetime(2026, 8, 17, 9, 2)
+        )
+
+        self.assertEqual(resumed["state"], "warning")
+        self.assertEqual(resumed["deadline_in_seconds"], 20)
+        self.assertEqual(resumed["snoozes_remaining"], 3)
+
+    def test_work_hours_boundary_discards_paused_work_interval_progress(self):
+        engine = Engine(
+            Config(work_hours={"monday": [["09:00", "09:02"]]}),
+            0,
+            datetime(2026, 8, 17, 9, 0),
+        )
+        engine.apply(
+            {"type": "activity", "active": True}, 0, datetime(2026, 8, 17, 9, 0)
+        )
+        engine.apply({"type": "time"}, 60, datetime(2026, 8, 17, 9, 1))
+        engine.apply(
+            {"type": "pause", "resume_at": "2026-08-17T10:00:00"},
+            60,
+            datetime(2026, 8, 17, 9, 1),
+        )
+
+        dormant = engine.status(120, datetime(2026, 8, 17, 9, 2))
+
+        self.assertEqual(dormant["state"], "dormant")
+        self.assertEqual(dormant["active_elapsed_seconds"], 0)
+        self.assertNotIn("pause_deadline", dormant)
 
 
 if __name__ == "__main__":
