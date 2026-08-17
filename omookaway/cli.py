@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+from pathlib import Path
 
 from .daemon import paths
 
@@ -22,12 +23,15 @@ def main() -> None:
     subparsers.add_parser("status")
     activity = subparsers.add_parser("activity")
     activity.add_argument("state", choices=("active", "idle"))
+    configure = subparsers.add_parser("configure")
+    configure.add_argument("file", type=Path)
     args = parser.parse_args()
-    message = (
-        {"type": "status"}
-        if args.command == "status"
-        else {"type": "activity", "active": args.state == "active"}
-    )
+    if args.command == "status":
+        message = {"type": "status"}
+    elif args.command == "activity":
+        message = {"type": "activity", "active": args.state == "active"}
+    else:
+        message = {"type": "configure", "config": json.loads(args.file.read_text())}
     print(json.dumps(asyncio.run(request(message)), indent=2))
 
 

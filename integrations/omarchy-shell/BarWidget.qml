@@ -23,6 +23,7 @@ BarWidget {
 
   function displayText() {
     if (!status.state) return "Breaks --"
+    if (status.state === "dormant") return "Breaks dormant"
     if (status.state === "warning") return "Break in " + Math.ceil(Number(status.deadline_in_seconds || 0)) + "s"
     var elapsed = Number(status.active_elapsed_seconds || 0)
     var total = Number(status.work_interval_seconds || 1800)
@@ -56,6 +57,10 @@ BarWidget {
     text: root.displayText()
     active: root.status.state === "warning"
     interactive: false
-    tooltipText: root.status.state === "warning" ? "Upcoming Break is owed" : "Active Work Interval progress"
+    tooltipText: root.status.state === "dormant"
+      ? "Outside Work Hours"
+      : root.status.state === "warning"
+        ? "Upcoming Break is owed"
+        : "Active Work Interval progress"
   }
 }

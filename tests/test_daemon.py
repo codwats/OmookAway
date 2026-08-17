@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from omookaway.daemon import StateFiles
@@ -8,6 +9,27 @@ from omookaway.engine import Config, Engine
 
 
 class StateFilesTest(unittest.TestCase):
+    def test_published_status_and_restore_reconcile_work_hours(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = StateFiles(root / "state.json", root / "status.json")
+            monday = datetime(2026, 8, 17, 9, 0)
+            engine = Engine(
+                Config(work_hours={"monday": [["09:00", "10:00"]]}), 0, monday
+            )
+            engine.apply({"type": "activity", "active": True}, 0, monday)
+            engine.apply({"type": "time"}, 300, datetime(2026, 8, 17, 9, 5))
+
+            files.publish(engine, 300, datetime(2026, 8, 17, 9, 5))
+            restored = files.load(9000, datetime(2026, 8, 17, 11, 0))
+
+            published = json.loads((root / "status.json").read_text())
+            self.assertEqual(published["state"], "work_interval")
+            self.assertEqual(
+                restored.status(9000, datetime(2026, 8, 17, 11, 0))["state"],
+                "dormant",
+            )
+
     def test_published_status_is_authoritative_and_state_restores(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -28,6 +28,29 @@ Inspect the same authoritative status used by the widget with:
 omookaway status
 ```
 
+## Configure Work Hours
+
+Configuration updates are atomic. Each window stays within one day; adjacent
+windows are allowed, but overlapping windows are rejected. Omitted days are
+dormant:
+
+```json
+{
+  "work_interval_seconds": 1800,
+  "warning_seconds": 20,
+  "work_hours": {
+    "monday": [["09:00", "12:00"], ["13:00", "17:00"]],
+    "tuesday": [["09:00", "17:00"]]
+  }
+}
+```
+
+Apply the file through the daemon:
+
+```sh
+omookaway configure config.json
+```
+
 ## Test
 
 ```sh
