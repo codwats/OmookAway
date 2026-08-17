@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "omookaway.status",
+  "name": "OmookAway",
+  "version": "0.1.0",
+  "author": "OmookAway",
+  "license": "MIT",
+  "description": "Authoritative Work Interval and Warning status.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {"barWidget": "BarWidget.qml"},
+  "barWidget": {
+    "displayName": "OmookAway",
+    "description": "Shows active-use progress and an owed Upcoming Break.",
+    "category": "System",
+    "defaultSection": "right",
+    "allowMultiple": false
+  }
+}

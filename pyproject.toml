@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omookaway"
+version = "0.1.0"
+description = "An Omarchy-native active-use break reminder"
+requires-python = ">=3.11"
+
+[project.scripts]
+omookaway = "omookaway.cli:main"
+omookawayd = "omookaway.daemon:main"
+
+[tool.setuptools]
+packages = ["omookaway"]

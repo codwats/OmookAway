@@ -1,0 +1,12 @@
+[Unit]
+Description=OmookAway aggregate activity observer
+PartOf=graphical-session.target
+After=omookaway.service
+Requires=omookaway.service
+
+[Service]
+ExecStart=/usr/bin/qs -p %h/.local/share/omookaway/activity
+Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target
