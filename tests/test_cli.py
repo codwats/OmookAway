@@ -34,6 +34,20 @@ class ShellCommandContractTest(unittest.TestCase):
         request.assert_awaited_once_with({"type": "start_manual_break"})
         self.assertEqual(json.loads(output.getvalue())["state"], "starting_break")
 
+    def test_snooze_sends_the_public_snooze_command(self):
+        output = StringIO()
+        request = AsyncMock(return_value={"state": "snooze"})
+
+        with (
+            patch("sys.argv", ["omookaway", "snooze"]),
+            patch.object(cli, "request", request),
+            redirect_stdout(output),
+        ):
+            cli.main()
+
+        request.assert_awaited_once_with({"type": "snooze"})
+        self.assertEqual(json.loads(output.getvalue())["state"], "snooze")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,6 +5,148 @@ from omookaway.engine import Config, Engine
 
 
 class EngineAcceptanceTest(unittest.TestCase):
+    def test_upcoming_break_starts_with_default_snooze_budget(self):
+        engine = Engine(Config(work_interval_seconds=60), now=0)
+        engine.apply({"type": "activity", "active": True}, now=0)
+
+        warning = engine.apply({"type": "time"}, now=60)
+
+        self.assertEqual(warning["state"], "warning")
+        self.assertEqual(warning["snoozes_remaining"], 3)
+        self.assertIn("snooze", warning["permitted_commands"])
+
+    def test_snooze_postpones_the_same_upcoming_break_then_warns_again(self):
+        engine = Engine(
+            Config(work_interval_seconds=60, warning_seconds=20), now=0
+        )
+        engine.apply({"type": "activity", "active": True}, now=0)
+        engine.apply({"type": "time"}, now=60)
+
+        snoozed = engine.apply({"type": "snooze"}, now=65)
+        before_expiry = engine.apply({"type": "time"}, now=364.999)
+        warning = engine.apply({"type": "time"}, now=365)
+
+        self.assertEqual(snoozed["state"], "snooze")
+        self.assertEqual(snoozed["deadline_in_seconds"], 300)
+        self.assertEqual(snoozed["snoozes_remaining"], 2)
+        self.assertEqual(before_expiry["state"], "snooze")
+        self.assertEqual(warning["state"], "warning")
+        self.assertEqual(warning["deadline_in_seconds"], 20)
+        self.assertEqual(warning["snoozes_remaining"], 2)
+        self.assertIn("snooze", warning["permitted_commands"])
+
+    def test_activity_changes_do_not_discard_a_snoozed_upcoming_break(self):
+        engine = Engine(Config(work_interval_seconds=60), now=0)
+        engine.apply({"type": "activity", "active": True}, now=0)
+        engine.apply({"type": "time"}, now=60)
+        engine.apply({"type": "snooze"}, now=65)
+
+        idle = engine.apply({"type": "activity", "active": False}, now=100)
+        active = engine.apply({"type": "activity", "active": True}, now=101)
+
+        self.assertEqual(idle["state"], "snooze")
+        self.assertEqual(active["state"], "snooze")
+        self.assertEqual(active["snoozes_remaining"], 2)
+
+    def test_ignored_warning_after_snooze_expiry_proceeds_to_enforcement(self):
+        engine = Engine(
+            Config(
+                work_interval_seconds=60,
+                warning_seconds=20,
+                snooze_seconds=300,
+            ),
+            now=0,
+        )
+        engine.apply({"type": "activity", "active": True}, now=0)
+        engine.apply({"type": "time"}, now=60)
+        engine.apply({"type": "snooze"}, now=65)
+
+        enforced = engine.apply({"type": "time"}, now=385)
+
+        self.assertEqual(enforced["state"], "starting_break")
+        self.assertEqual(enforced["snoozes_remaining"], 2)
+        self.assertEqual(enforced["requested_effects"], [{"type": "launch_break"}])
+
+    def test_exhausted_snooze_budget_proceeds_to_enforcement(self):
+        engine = Engine(
+            Config(
+                work_interval_seconds=60,
+                warning_seconds=20,
+                snooze_seconds=300,
+            ),
+            now=0,
+        )
+        engine.apply({"type": "activity", "active": True}, now=0)
+        engine.apply({"type": "time"}, now=60)
+
+        remaining = []
+        for snoozed_at in (65, 370, 675):
+            snoozed = engine.apply({"type": "snooze"}, now=snoozed_at)
+            remaining.append(snoozed["snoozes_remaining"])
+            warning = engine.apply({"type": "time"}, now=snoozed_at + 300)
+
+        self.assertEqual(remaining, [2, 1, 0])
+        self.assertEqual(warning["snoozes_remaining"], 0)
+        self.assertNotIn("snooze", warning["permitted_commands"])
+        with self.assertRaisesRegex(ValueError, "Snooze is not available"):
+            engine.apply({"type": "snooze"}, now=976)
+
+        enforced = engine.apply({"type": "time"}, now=995)
+        self.assertEqual(enforced["state"], "starting_break")
+        self.assertEqual(enforced["snoozes_remaining"], 0)
+        self.assertEqual(enforced["requested_effects"], [{"type": "launch_break"}])
+
+    def test_snooze_is_ignored_outside_warning(self):
+        engine = Engine(Config(), now=0)
+
+        with self.assertRaisesRegex(ValueError, "Snooze is not available"):
+            engine.apply({"type": "snooze"}, now=0)
+
+        self.assertEqual(engine.status(0)["state"], "idle")
+
+    def test_snooze_configuration_applies_only_to_new_upcoming_breaks(self):
+        engine = Engine(
+            Config(
+                work_interval_seconds=60,
+                warning_seconds=20,
+                break_seconds=100,
+                snooze_seconds=300,
+                snooze_budget=3,
+            ),
+            now=0,
+        )
+        engine.apply({"type": "activity", "active": True}, now=0)
+        engine.apply({"type": "time"}, now=60)
+        configured = engine.apply(
+            {
+                "type": "configure",
+                "config": {"snooze_seconds": 30, "snooze_budget": 1},
+            },
+            now=65,
+        )
+
+        current = engine.apply({"type": "snooze"}, now=66)
+        self.assertEqual(configured["snoozes_remaining"], 3)
+        self.assertEqual(current["deadline_in_seconds"], 300)
+
+        engine.apply({"type": "time"}, now=366)
+        engine.apply({"type": "time"}, now=386)
+        engine.apply(
+            {
+                "type": "overlay_ready",
+                "display_ids": ["display"],
+                "covered_display_ids": ["display"],
+                "input_inhibited": True,
+            },
+            now=386,
+        )
+        engine.apply({"type": "time"}, now=486)
+        next_warning = engine.apply({"type": "time"}, now=546)
+        next_snooze = engine.apply({"type": "snooze"}, now=547)
+
+        self.assertEqual(next_warning["snoozes_remaining"], 1)
+        self.assertEqual(next_snooze["deadline_in_seconds"], 30)
+
     def test_manual_break_is_permitted_during_work_hours_and_launches_immediately(self):
         engine = Engine(
             Config(work_interval_seconds=60, warning_seconds=20, break_seconds=100),
@@ -491,7 +633,7 @@ class EngineAcceptanceTest(unittest.TestCase):
         self.assertEqual(warning["state"], "warning")
         self.assertTrue(warning["upcoming_break"])
         self.assertEqual(warning["deadline_in_seconds"], 20)
-        self.assertEqual(warning["permitted_commands"], [])
+        self.assertEqual(warning["permitted_commands"], ["snooze"])
 
     def test_idle_time_does_not_advance_active_elapsed_time(self):
         engine = Engine(Config(), now=0)

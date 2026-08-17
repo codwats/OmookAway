@@ -44,7 +44,7 @@ class StateFilesTest(unittest.TestCase):
             restored = files.load(now=9000)
 
             self.assertEqual(status["state"], "warning")
-            self.assertEqual(status["permitted_commands"], [])
+            self.assertEqual(status["permitted_commands"], ["snooze"])
             self.assertEqual(restored.status(now=9000)["deadline_in_seconds"], 15)
 
     def test_invalid_persisted_lifecycle_fails_safe(self):

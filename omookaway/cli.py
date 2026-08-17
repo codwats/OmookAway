@@ -32,6 +32,7 @@ def main() -> None:
     failed = subparsers.add_parser("overlay-failed")
     failed.add_argument("error")
     subparsers.add_parser("start-break")
+    subparsers.add_parser("snooze")
     subparsers.add_parser("finish-break")
     subparsers.add_parser("retry-enforcement")
     args = parser.parse_args()
@@ -50,6 +51,8 @@ def main() -> None:
         message = {"type": "overlay_failed", "error": args.error}
     elif args.command == "start-break":
         message = {"type": "start_manual_break"}
+    elif args.command == "snooze":
+        message = {"type": "snooze"}
     elif args.command == "finish-break":
         message = {"type": "finish_break"}
     elif args.command == "retry-enforcement":

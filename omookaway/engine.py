@@ -64,13 +64,26 @@ class Config:
     work_interval_seconds: int = 30 * 60
     warning_seconds: int = 20
     break_seconds: int = 5 * 60
+    snooze_seconds: int = 5 * 60
+    snooze_budget: int = 3
     work_hours: Any = None
 
     def __post_init__(self) -> None:
-        for name in ("work_interval_seconds", "warning_seconds", "break_seconds"):
+        for name in (
+            "work_interval_seconds",
+            "warning_seconds",
+            "break_seconds",
+            "snooze_seconds",
+        ):
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise ValueError(f"{name} must be positive")
+        if (
+            not isinstance(self.snooze_budget, int)
+            or isinstance(self.snooze_budget, bool)
+            or self.snooze_budget < 0
+        ):
+            raise ValueError("snooze_budget must be non-negative")
         object.__setattr__(self, "work_hours", _work_hours(self.work_hours))
 
 
@@ -78,7 +91,20 @@ class Engine:
     """Public deterministic seam shared by production adapters and tests."""
 
     STATES = {
-        "dormant", "idle", "work_interval", "warning", "starting_break", "break",
+        "dormant",
+        "idle",
+        "work_interval",
+        "warning",
+        "snooze",
+        "starting_break",
+        "break",
+        "enforcement_unavailable",
+    }
+    UPCOMING_BREAK_STATES = {
+        "warning",
+        "snooze",
+        "starting_break",
+        "break",
         "enforcement_unavailable",
     }
 
@@ -90,6 +116,9 @@ class Engine:
         self.active_elapsed = 0.0
         self.last_at = now
         self.warning_deadline: float | None = None
+        self.snooze_deadline: float | None = None
+        self.snoozes_remaining: int | None = None
+        self.upcoming_break_snooze_seconds: int | None = None
         self.break_started_at: float | None = None
         self.break_deadline: float | None = None
         self.requested_effects: list[dict[str, Any]] = []
@@ -133,9 +162,7 @@ class Engine:
             self.active = event.get("active") is True
             if self.window is None:
                 self.state = "dormant"
-            elif self.state not in {
-                "warning", "starting_break", "break", "enforcement_unavailable"
-            }:
+            elif self.state not in self.UPCOMING_BREAK_STATES:
                 self.state = "work_interval" if self.active else "idle"
         elif event.get("type") == "overlay_ready":
             if self.state not in {"starting_break", "break"}:
@@ -163,6 +190,14 @@ class Engine:
             self.state = "starting_break"
             self.enforcement_error = None
             self.requested_effects.append({"type": "launch_break"})
+        elif event.get("type") == "snooze":
+            if self.state != "warning" or not self.snoozes_remaining:
+                raise ValueError("Snooze is not available")
+            self.snoozes_remaining -= 1
+            self.state = "snooze"
+            assert self.upcoming_break_snooze_seconds is not None
+            self.warning_deadline = None
+            self.snooze_deadline = now + self.upcoming_break_snooze_seconds
         elif event.get("type") == "start_manual_break":
             if self.state not in {"idle", "work_interval"}:
                 raise ValueError("Manual Break is not available")
@@ -187,6 +222,8 @@ class Engine:
             if elapsed >= due_in:
                 self.active_elapsed = float(self.config.work_interval_seconds)
                 self.state = "warning"
+                self.snoozes_remaining = self.config.snooze_budget
+                self.upcoming_break_snooze_seconds = self.config.snooze_seconds
                 self.warning_deadline = self.last_at + due_in + self.config.warning_seconds
             else:
                 self.active_elapsed += elapsed
@@ -195,6 +232,16 @@ class Engine:
                 self.state = "starting_break"
                 self.warning_deadline = None
                 self.requested_effects.append({"type": "launch_break"})
+        elif self.state == "snooze" and self.snooze_deadline is not None:
+            if now >= self.snooze_deadline:
+                warning_deadline = self.snooze_deadline + self.config.warning_seconds
+                self.snooze_deadline = None
+                if now >= warning_deadline:
+                    self.state = "starting_break"
+                    self.requested_effects.append({"type": "launch_break"})
+                else:
+                    self.state = "warning"
+                    self.warning_deadline = warning_deadline
         elif self.state == "break" and self.break_deadline is not None:
             if now >= self.break_deadline:
                 self._finish_break("satisfied")
@@ -208,6 +255,9 @@ class Engine:
             self.today_aborted_breaks += 1
         self.active_elapsed = 0.0
         self.warning_deadline = None
+        self.snooze_deadline = None
+        self.snoozes_remaining = None
+        self.upcoming_break_snooze_seconds = None
         self.break_started_at = None
         self.break_deadline = None
         self.enforcement_error = None
@@ -248,6 +298,9 @@ class Engine:
         self.active = False
         self.active_elapsed = 0.0
         self.warning_deadline = None
+        self.snooze_deadline = None
+        self.snoozes_remaining = None
+        self.upcoming_break_snooze_seconds = None
         self.break_started_at = None
         self.break_deadline = None
         self.enforcement_error = None
@@ -269,9 +322,7 @@ class Engine:
             "work_interval_seconds": self.config.work_interval_seconds,
             "active_elapsed_seconds": round(elapsed, 3),
             "progress": elapsed / self.config.work_interval_seconds,
-            "upcoming_break": self.state in {
-                "warning", "starting_break", "break", "enforcement_unavailable"
-            },
+            "upcoming_break": self.state in self.UPCOMING_BREAK_STATES,
             "permitted_commands": [],
             "requested_effects": list(self.requested_effects),
             "today_satisfied_breaks": self.today_satisfied_breaks,
@@ -280,16 +331,22 @@ class Engine:
         }
         if self.warning_deadline is not None:
             result["deadline_in_seconds"] = max(0, round(self.warning_deadline - now, 3))
+        elif self.snooze_deadline is not None:
+            result["deadline_in_seconds"] = max(0, round(self.snooze_deadline - now, 3))
         if self.break_deadline is not None:
             result["break_remaining_seconds"] = max(0, round(self.break_deadline - now, 3))
         if self.state == "break":
             result["permitted_commands"] = ["finish_break"]
+        elif self.state == "warning" and self.snoozes_remaining:
+            result["permitted_commands"] = ["snooze"]
         elif self.state == "enforcement_unavailable":
             result["permitted_commands"] = ["retry_enforcement"]
         elif self.state in {"idle", "work_interval"}:
             result["permitted_commands"] = ["start_manual_break"]
         if self.last_break_outcome is not None:
             result["last_break_outcome"] = self.last_break_outcome
+        if result["upcoming_break"]:
+            result["snoozes_remaining"] = self.snoozes_remaining
         if self.enforcement_error is not None:
             result["enforcement_error"] = self.enforcement_error
         return result
@@ -304,6 +361,13 @@ class Engine:
             "warning_remaining_seconds": (
                 max(0, self.warning_deadline - now) if self.warning_deadline is not None else None
             ),
+            "snooze_remaining_seconds": (
+                max(0, self.snooze_deadline - now)
+                if self.snooze_deadline is not None
+                else None
+            ),
+            "snoozes_remaining": self.snoozes_remaining,
+            "upcoming_break_snooze_seconds": self.upcoming_break_snooze_seconds,
             "break_started_elapsed_seconds": (
                 now - self.break_started_at if self.break_started_at is not None else None
             ),
@@ -338,6 +402,14 @@ class Engine:
         engine.active_elapsed = float(snapshot["active_elapsed_seconds"])
         remaining = snapshot.get("warning_remaining_seconds")
         engine.warning_deadline = now + float(remaining) if remaining is not None else None
+        snooze_remaining = snapshot.get("snooze_remaining_seconds")
+        engine.snooze_deadline = (
+            now + float(snooze_remaining) if snooze_remaining is not None else None
+        )
+        engine.snoozes_remaining = snapshot.get("snoozes_remaining")
+        engine.upcoming_break_snooze_seconds = snapshot.get(
+            "upcoming_break_snooze_seconds"
+        )
         started_elapsed = snapshot.get("break_started_elapsed_seconds")
         engine.break_started_at = (
             now - float(started_elapsed) if started_elapsed is not None else None
@@ -358,6 +430,7 @@ class Engine:
         if engine.state in {"starting_break", "break", "enforcement_unavailable"}:
             engine.state = "warning"
             engine.warning_deadline = now
+            engine.snooze_deadline = None
             engine.break_started_at = None
             engine.break_deadline = None
         engine._reconcile_count_date(civil_now or datetime.now().astimezone())

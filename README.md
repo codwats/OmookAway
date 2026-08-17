@@ -39,6 +39,9 @@ omookaway status
 During Work Hours, select the Shell widget or run `omookaway start-break` to
 start a Manual Break immediately.
 
+During a Warning, the widget shows the remaining Snooze Budget. Select it or
+run `omookaway snooze` to postpone that Upcoming Break.
+
 ## Configure Work Hours
 
 Configuration updates are atomic. Each window stays within one day; adjacent
@@ -49,6 +52,8 @@ dormant:
 {
   "work_interval_seconds": 1800,
   "warning_seconds": 20,
+  "snooze_seconds": 300,
+  "snooze_budget": 3,
   "work_hours": {
     "monday": [["09:00", "12:00"], ["13:00", "17:00"]],
     "tuesday": [["09:00", "17:00"]]
