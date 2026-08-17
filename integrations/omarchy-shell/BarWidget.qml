@@ -24,15 +24,19 @@ BarWidget {
   function displayText() {
     if (!status.state) return "Breaks --"
     if (status.state === "dormant") return "Breaks dormant"
-    if (status.state === "warning") return "Break in " + Math.ceil(Number(status.deadline_in_seconds || 0)) + "s"
-    if (status.state === "snooze") return "Break snoozed " + Math.ceil(Number(status.deadline_in_seconds || 0) / 60) + "m"
+    if (status.state === "activity_unavailable") return "Activity unavailable"
+    var mode = status.degraded_wall_clock_mode
+      ? "Wall clock · "
+      : status.activity_observation_error ? "Observer off · " : ""
+    if (status.state === "warning") return mode + "Break in " + Math.ceil(Number(status.deadline_in_seconds || 0)) + "s"
+    if (status.state === "snooze") return mode + "Break snoozed " + Math.ceil(Number(status.deadline_in_seconds || 0) / 60) + "m"
     if (status.state === "pause") {
       var deadline = new Date(String(status.pause_deadline || ""))
-      return isNaN(deadline.getTime()) ? "Paused" : "Paused until " + Qt.formatTime(deadline, "h:mm AP")
+      return mode + (isNaN(deadline.getTime()) ? "Paused" : "Paused until " + Qt.formatTime(deadline, "h:mm AP"))
     }
     var elapsed = Number(status.active_elapsed_seconds || 0)
     var total = Number(status.work_interval_seconds || 1800)
-    return Math.floor(elapsed / 60) + "/" + Math.floor(total / 60) + "m"
+    return mode + Math.floor(elapsed / 60) + "/" + Math.floor(total / 60) + "m"
   }
 
   function canStartManualBreak() {
@@ -48,6 +52,16 @@ BarWidget {
   function canResume() {
     var commands = status.permitted_commands
     return Array.isArray(commands) && commands.indexOf("resume") !== -1
+  }
+
+  function canEnterDegradedMode() {
+    var commands = status.permitted_commands
+    return Array.isArray(commands) && commands.indexOf("enter_degraded_wall_clock_mode") !== -1
+  }
+
+  function canLeaveDegradedMode() {
+    var commands = status.permitted_commands
+    return Array.isArray(commands) && commands.indexOf("leave_degraded_wall_clock_mode") !== -1
   }
 
   implicitWidth: button.implicitWidth
@@ -88,17 +102,35 @@ BarWidget {
     onExited: statusFile.reload()
   }
 
+  Process {
+    id: enterDegradedProcess
+    command: ["omookaway", "degraded-wall-clock", "enter"]
+    onExited: statusFile.reload()
+  }
+
+  Process {
+    id: leaveDegradedProcess
+    command: ["omookaway", "degraded-wall-clock", "leave"]
+    onExited: statusFile.reload()
+  }
+
   WidgetButton {
     id: button
     anchors.fill: parent
     bar: root.bar
     text: root.displayText()
-    active: root.status.state === "warning"
-    interactive: (root.canResume() && !resumeProcess.running)
+    active: root.status.state === "warning" || root.status.degraded_wall_clock_mode
+    interactive: (root.canEnterDegradedMode() && !enterDegradedProcess.running)
+      || (root.canLeaveDegradedMode() && !leaveDegradedProcess.running)
+      || (root.canResume() && !resumeProcess.running)
       || (root.canSnooze() && !snoozeProcess.running)
       || (root.canStartManualBreak() && !manualBreakProcess.running)
     tooltipText: root.status.state === "dormant"
       ? "Outside Work Hours"
+      : root.canEnterDegradedMode()
+        ? "Activity observation unavailable; use wall-clock cadence"
+      : root.canLeaveDegradedMode()
+        ? "Using Degraded Wall-Clock Mode; stop fallback"
       : root.status.state === "pause"
         ? "Paused until " + String(root.status.pause_deadline || "the chosen time")
       : root.status.state === "warning"
@@ -114,6 +146,10 @@ BarWidget {
         resumeProcess.running = true
       else if (root.canSnooze() && !snoozeProcess.running)
         snoozeProcess.running = true
+      else if (root.canEnterDegradedMode() && !enterDegradedProcess.running)
+        enterDegradedProcess.running = true
+      else if (root.canLeaveDegradedMode() && !leaveDegradedProcess.running)
+        leaveDegradedProcess.running = true
       else if (root.canStartManualBreak() && !manualBreakProcess.running)
         manualBreakProcess.running = true
     }

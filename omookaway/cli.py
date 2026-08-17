@@ -23,6 +23,10 @@ def main() -> None:
     subparsers.add_parser("status")
     activity = subparsers.add_parser("activity")
     activity.add_argument("state", choices=("active", "idle"))
+    observation = subparsers.add_parser("activity-observation")
+    observation.add_argument("state", choices=("available", "unavailable"))
+    degraded = subparsers.add_parser("degraded-wall-clock")
+    degraded.add_argument("state", choices=("enter", "leave"))
     lock = subparsers.add_parser("lock")
     lock.add_argument("state", choices=("locked", "unlocked"))
     suspend = subparsers.add_parser("suspend")
@@ -47,6 +51,13 @@ def main() -> None:
         message = {"type": "status"}
     elif args.command == "activity":
         message = {"type": "activity", "active": args.state == "active"}
+    elif args.command == "activity-observation":
+        message = {
+            "type": "activity_observation",
+            "available": args.state == "available",
+        }
+    elif args.command == "degraded-wall-clock":
+        message = {"type": f"{args.state}_degraded_wall_clock_mode"}
     elif args.command == "lock":
         message = {"type": "lock", "locked": args.state == "locked"}
     elif args.command == "suspend":

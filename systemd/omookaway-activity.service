@@ -6,6 +6,7 @@ Requires=omookaway.service
 
 [Service]
 ExecStart=/usr/bin/qs -p %h/.local/share/omookaway/activity
+ExecStopPost=-/usr/bin/env omookaway activity-observation unavailable
 Restart=on-failure
 
 [Install]

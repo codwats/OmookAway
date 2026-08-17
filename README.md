@@ -54,6 +54,20 @@ omookaway pause 2026-08-17T14:30:00-07:00
 
 The widget displays the Pause deadline. Resume early with `omookaway resume`.
 
+If aggregate activity observation cannot start or stops at runtime, Work
+Interval progress becomes dormant and the Shell reports `Activity unavailable`.
+OmookAway never substitutes wall time automatically. To deliberately continue
+cadence by elapsed wall time during the current Work Hours Window, select the
+Shell control or run:
+
+```sh
+omookaway degraded-wall-clock enter
+```
+
+Stop the fallback with `omookaway degraded-wall-clock leave`. Restoring the
+activity observer also stops it automatically and waits for a fresh aggregate
+activity sample. Existing Upcoming Breaks remain owed throughout.
+
 ## Configure Work Hours
 
 Configuration updates are atomic. Each window stays within one day; adjacent

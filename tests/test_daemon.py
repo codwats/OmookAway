@@ -10,6 +10,17 @@ from omookaway.engine import Config, Engine
 
 
 class StateFilesTest(unittest.TestCase):
+    def test_missing_state_starts_with_dormant_activity_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = StateFiles(root / "state.json", root / "status.json")
+
+            status = files.load(now=0).status(now=30)
+
+            self.assertEqual(status["state"], "activity_unavailable")
+            self.assertEqual(status["active_elapsed_seconds"], 0)
+            self.assertFalse(status["degraded_wall_clock_mode"])
+
     def test_published_status_and_restore_reconcile_work_hours(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -69,10 +80,34 @@ class StateFilesTest(unittest.TestCase):
 
             restored = files.load(now=0)
 
-            self.assertEqual(restored.status(now=0)["state"], "idle")
+            self.assertEqual(restored.status(now=0)["state"], "activity_unavailable")
 
 
 class DaemonOverlayContractTest(unittest.IsolatedAsyncioTestCase):
+    async def test_runtime_observer_loss_publishes_authoritative_dormant_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = StateFiles(root / "state.json", root / "status.json")
+            daemon = Daemon(root / "engine.sock", files, overlay=object())
+            daemon.engine.apply(
+                {"type": "activity", "active": True}, now=daemon.engine.last_at
+            )
+            reader = AsyncMock()
+            reader.readline.return_value = (
+                b'{"type":"activity_observation","available":false}\n'
+            )
+            writer = Mock()
+            writer.drain = AsyncMock()
+            writer.wait_closed = AsyncMock()
+
+            await daemon.handle(reader, writer)
+
+            response = json.loads(writer.write.call_args.args[0])
+            published = json.loads((root / "status.json").read_text())
+            self.assertEqual(response["state"], "activity_unavailable")
+            self.assertEqual(published["state"], "activity_unavailable")
+            self.assertFalse(published["degraded_wall_clock_mode"])
+
     async def test_rejected_manual_break_returns_the_authoritative_state(self):
         class Writer:
             def __init__(self):

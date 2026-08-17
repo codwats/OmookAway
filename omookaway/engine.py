@@ -138,6 +138,8 @@ class Engine:
         self.count_date = (civil_now or datetime.now().astimezone()).date().isoformat()
         self.enforcement_error: str | None = None
         self.consecutive_enforcement_failures = 0
+        self.activity_observation_available = False
+        self.degraded_wall_clock_mode = False
 
     def apply(
         self, event: dict[str, Any], now: float, civil_now: datetime | None = None
@@ -174,7 +176,37 @@ class Engine:
                 and self.active_elapsed >= self.config.work_interval_seconds
             ):
                 self.active_elapsed = 0.0
+        elif event.get("type") == "activity_observation":
+            available = event.get("available") is True
+            self.activity_observation_available = available
+            if available:
+                self.degraded_wall_clock_mode = False
+            self.input_active = False
+            self.active = False
+            if self.window is not None and self.state not in self.UPCOMING_BREAK_STATES:
+                self.state = "idle"
+            self.last_at = now
+        elif event.get("type") == "enter_degraded_wall_clock_mode":
+            if (
+                self.activity_observation_available
+                or self.window is None
+                or self.state not in {"idle", "work_interval", "warning", "snooze"}
+            ):
+                raise ValueError("Degraded Wall-Clock Mode is not available")
+            self.degraded_wall_clock_mode = True
+            if self.state not in self.UPCOMING_BREAK_STATES and self.state != "pause":
+                self.state = "work_interval"
+            self.last_at = now
+        elif event.get("type") == "leave_degraded_wall_clock_mode":
+            if not self.degraded_wall_clock_mode:
+                raise ValueError("Degraded Wall-Clock Mode is not active")
+            self.degraded_wall_clock_mode = False
+            if self.state not in self.UPCOMING_BREAK_STATES and self.state != "pause":
+                self.state = "idle"
+            self.last_at = now
         elif event.get("type") == "activity":
+            self.activity_observation_available = True
+            self.degraded_wall_clock_mode = False
             observed_active = event.get("active") is True
             self.input_active = observed_active
             if observed_active:
@@ -284,7 +316,10 @@ class Engine:
     def _advance(self, now: float) -> None:
         if now < self.last_at:
             raise ValueError("monotonic time moved backwards")
-        if self.active and self.state == "work_interval":
+        advancing_work_interval = (
+            self.activity_observation_available and self.active
+        ) or self.degraded_wall_clock_mode and not self.away_sources
+        if advancing_work_interval and self.state == "work_interval":
             due_in = self.config.work_interval_seconds - self.active_elapsed
             elapsed = now - self.last_at
             if elapsed >= due_in:
@@ -423,6 +458,7 @@ class Engine:
         self.break_deadline = None
         self.enforcement_error = None
         self.consecutive_enforcement_failures = 0
+        self.degraded_wall_clock_mode = False
         if window is None:
             self.state = "dormant"
         else:
@@ -441,8 +477,16 @@ class Engine:
         ):
             self._resume(now)
         elapsed = min(self.active_elapsed, self.config.work_interval_seconds)
+        reported_state = self.state
+        if (
+            self.window is not None
+            and not self.activity_observation_available
+            and not self.degraded_wall_clock_mode
+            and self.state in {"idle", "work_interval"}
+        ):
+            reported_state = "activity_unavailable"
         result: dict[str, Any] = {
-            "state": self.state,
+            "state": reported_state,
             "work_interval_seconds": self.config.work_interval_seconds,
             "idle_threshold_seconds": self.config.idle_threshold_seconds,
             "active_elapsed_seconds": round(elapsed, 3),
@@ -454,6 +498,8 @@ class Engine:
             "today_satisfied_breaks": self.today_satisfied_breaks,
             "today_aborted_breaks": self.today_aborted_breaks,
             "consecutive_enforcement_failures": self.consecutive_enforcement_failures,
+            "activity_observation_available": self.activity_observation_available,
+            "degraded_wall_clock_mode": self.degraded_wall_clock_mode,
         }
         if self.warning_deadline is not None:
             result["deadline_in_seconds"] = max(0, round(self.warning_deadline - now, 3))
@@ -473,6 +519,8 @@ class Engine:
             result["permitted_commands"] = ["resume"]
         elif self.state == "enforcement_unavailable":
             result["permitted_commands"] = ["retry_enforcement"]
+        elif reported_state == "activity_unavailable":
+            result["permitted_commands"] = ["start_manual_break"]
         elif self.state in {"idle", "work_interval"}:
             result["permitted_commands"] = ["start_manual_break"]
             if self.state == "work_interval":
@@ -485,6 +533,19 @@ class Engine:
             result["snoozes_remaining"] = self.snoozes_remaining
         if self.enforcement_error is not None:
             result["enforcement_error"] = self.enforcement_error
+        if (
+            self.window is not None
+            and not self.activity_observation_available
+            and not self.degraded_wall_clock_mode
+        ):
+            result["activity_observation_error"] = "Activity observation unavailable"
+            if (
+                self.state in {"idle", "work_interval"}
+                and "enter_degraded_wall_clock_mode" not in result["permitted_commands"]
+            ):
+                result["permitted_commands"].append("enter_degraded_wall_clock_mode")
+        if self.degraded_wall_clock_mode:
+            result["permitted_commands"].append("leave_degraded_wall_clock_mode")
         return result
 
     def snapshot(
@@ -530,6 +591,7 @@ class Engine:
             "count_date": self.count_date,
             "enforcement_error": self.enforcement_error,
             "consecutive_enforcement_failures": self.consecutive_enforcement_failures,
+            "activity_observation_available": self.activity_observation_available,
             "work_hours_window": self.window,
         }
 
@@ -597,6 +659,8 @@ class Engine:
         engine.consecutive_enforcement_failures = int(
             snapshot.get("consecutive_enforcement_failures", 0)
         )
+        engine.activity_observation_available = False
+        engine.degraded_wall_clock_mode = False
         engine.consecutive_enforcement_failures = 0
         if engine.state in {"starting_break", "break", "enforcement_unavailable"}:
             engine.state = "warning"

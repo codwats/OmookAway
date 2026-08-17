@@ -5,6 +5,94 @@ from omookaway.engine import Config, Engine
 
 
 class EngineAcceptanceTest(unittest.TestCase):
+    def test_activity_observation_starts_unavailable_and_does_not_advance(self):
+        engine = Engine(Config(work_interval_seconds=60), now=0)
+
+        status = engine.apply({"type": "time"}, now=30)
+
+        self.assertEqual(status["state"], "activity_unavailable")
+        self.assertEqual(
+            status["activity_observation_error"], "Activity observation unavailable"
+        )
+        self.assertEqual(status["active_elapsed_seconds"], 0)
+        self.assertFalse(status["degraded_wall_clock_mode"])
+        self.assertIn("enter_degraded_wall_clock_mode", status["permitted_commands"])
+
+    def test_explicit_degraded_mode_advances_by_wall_time_only_inside_work_hours(self):
+        work_hours = {"monday": [["09:00", "10:00"]]}
+        engine = Engine(
+            Config(work_interval_seconds=60, work_hours=work_hours),
+            now=0,
+            civil_now=datetime(2026, 8, 17, 9, 0),
+        )
+
+        selected = engine.apply(
+            {"type": "enter_degraded_wall_clock_mode"},
+            now=0,
+            civil_now=datetime(2026, 8, 17, 9, 0),
+        )
+        advanced = engine.apply(
+            {"type": "time"},
+            now=30,
+            civil_now=datetime(2026, 8, 17, 9, 0, 30),
+        )
+        outside = engine.apply(
+            {"type": "time"},
+            now=3600,
+            civil_now=datetime(2026, 8, 17, 10, 0),
+        )
+
+        self.assertTrue(selected["degraded_wall_clock_mode"])
+        self.assertEqual(advanced["active_elapsed_seconds"], 30)
+        self.assertEqual(outside["state"], "dormant")
+        self.assertEqual(outside["active_elapsed_seconds"], 0)
+        self.assertFalse(outside["degraded_wall_clock_mode"])
+
+    def test_restored_observation_exits_fallback_without_inventing_active_time(self):
+        engine = Engine(Config(work_interval_seconds=60), now=0)
+        engine.apply({"type": "enter_degraded_wall_clock_mode"}, now=0)
+        engine.apply({"type": "time"}, now=20)
+
+        restored = engine.apply(
+            {"type": "activity_observation", "available": True}, now=20
+        )
+        later = engine.apply({"type": "time"}, now=50)
+
+        self.assertFalse(restored["degraded_wall_clock_mode"])
+        self.assertEqual(restored["state"], "idle")
+        self.assertEqual(later["active_elapsed_seconds"], 20)
+
+    def test_daemon_restart_does_not_automatically_restore_degraded_mode(self):
+        engine = Engine(Config(work_interval_seconds=60), now=0)
+        engine.apply({"type": "enter_degraded_wall_clock_mode"}, now=0)
+        engine.apply({"type": "time"}, now=20)
+
+        restored = Engine.restore(engine.snapshot(now=20), now=100)
+        later = restored.apply({"type": "time"}, now=130)
+
+        self.assertEqual(later["state"], "activity_unavailable")
+        self.assertFalse(later["degraded_wall_clock_mode"])
+        self.assertEqual(later["active_elapsed_seconds"], 20)
+
+    def test_runtime_observer_loss_preserves_an_upcoming_break(self):
+        engine = Engine(Config(work_interval_seconds=10), now=0)
+        engine.apply({"type": "activity_observation", "available": True}, now=0)
+        engine.apply({"type": "activity", "active": True}, now=0)
+        engine.apply({"type": "time"}, now=10)
+
+        unavailable = engine.apply(
+            {"type": "activity_observation", "available": False}, now=10
+        )
+        selected = engine.apply({"type": "enter_degraded_wall_clock_mode"}, now=10)
+        left = engine.apply({"type": "leave_degraded_wall_clock_mode"}, now=10)
+
+        self.assertTrue(unavailable["upcoming_break"])
+        self.assertEqual(unavailable["state"], "warning")
+        self.assertFalse(unavailable["activity_observation_available"])
+        self.assertTrue(selected["upcoming_break"])
+        self.assertTrue(left["upcoming_break"])
+        self.assertEqual(left["state"], "warning")
+
     def test_upcoming_break_starts_with_default_snooze_budget(self):
         engine = Engine(Config(work_interval_seconds=60), now=0)
         engine.apply({"type": "activity", "active": True}, now=0)
@@ -102,7 +190,7 @@ class EngineAcceptanceTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Snooze is not available"):
             engine.apply({"type": "snooze"}, now=0)
 
-        self.assertEqual(engine.status(0)["state"], "idle")
+        self.assertEqual(engine.status(0)["state"], "activity_unavailable")
 
     def test_snooze_configuration_applies_only_to_new_upcoming_breaks(self):
         engine = Engine(
@@ -763,7 +851,7 @@ class EngineAcceptanceTest(unittest.TestCase):
             datetime(2026, 8, 17, 9, 6),
         )
 
-        self.assertEqual(resumed["state"], "idle")
+        self.assertEqual(resumed["state"], "activity_unavailable")
         self.assertEqual(resumed["last_break_outcome"], "satisfied")
         self.assertEqual(resumed["today_satisfied_breaks"], 1)
 

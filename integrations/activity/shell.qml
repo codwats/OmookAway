@@ -17,6 +17,7 @@ ShellRoot {
     try {
       var status = JSON.parse(String(content || ""))
       idleThreshold = Number(status.idle_threshold_seconds || 300)
+      if (status.state === "activity_unavailable") publish(!idleMonitor.isIdle)
     } catch (error) {
       idleThreshold = 300
     }

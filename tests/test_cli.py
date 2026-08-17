@@ -124,6 +124,66 @@ class ShellCommandContractTest(unittest.TestCase):
             ],
         )
 
+    def test_observer_and_degraded_mode_commands_use_public_engine_events(self):
+        request = AsyncMock(return_value={"state": "activity_unavailable"})
+
+        cases = (
+            (
+                ["omookaway", "activity-observation", "unavailable"],
+                {"type": "activity_observation", "available": False},
+            ),
+            (
+                ["omookaway", "degraded-wall-clock", "enter"],
+                {"type": "enter_degraded_wall_clock_mode"},
+            ),
+            (
+                ["omookaway", "degraded-wall-clock", "leave"],
+                {"type": "leave_degraded_wall_clock_mode"},
+            ),
+        )
+        for argv, event in cases:
+            with (
+                patch("sys.argv", argv),
+                patch.object(cli, "request", request),
+                redirect_stdout(StringIO()),
+            ):
+                cli.main()
+
+        self.assertEqual(
+            [call.args[0] for call in request.await_args_list],
+            [case[1] for case in cases],
+        )
+
+    def test_observer_process_reports_startup_and_runtime_health(self):
+        root = Path(__file__).parents[1]
+        observer = (root / "integrations" / "activity" / "shell.qml").read_text()
+        service = (root / "systemd" / "omookaway-activity.service").read_text()
+
+        self.assertIn('status.state === "activity_unavailable"', observer)
+        self.assertIn("publish(!idleMonitor.isIdle)", observer)
+        self.assertIn(
+            "ExecStopPost=-/usr/bin/env omookaway activity-observation unavailable",
+            service,
+        )
+
+    def test_shell_widget_uses_authoritative_degraded_controls(self):
+        widget = (
+            Path(__file__).parents[1]
+            / "integrations"
+            / "omarchy-shell"
+            / "BarWidget.qml"
+        ).read_text()
+
+        self.assertIn('commands.indexOf("enter_degraded_wall_clock_mode")', widget)
+        self.assertIn('commands.indexOf("leave_degraded_wall_clock_mode")', widget)
+        self.assertIn('command: ["omookaway", "degraded-wall-clock", "enter"]', widget)
+        self.assertIn('command: ["omookaway", "degraded-wall-clock", "leave"]', widget)
+        self.assertLess(
+            widget.index("else if (root.canSnooze()"),
+            widget.index("else if (root.canEnterDegradedMode()"),
+        )
+        self.assertIn("return mode + (isNaN(deadline.getTime())", widget)
+
 
 if __name__ == "__main__":
     unittest.main()
