@@ -16,17 +16,10 @@ offers one deliberate End Break control: before 20 percent it records an
 Aborted Break, and at or after 20 percent it records a Satisfied Break. Natural
 timer expiry is also Satisfied.
 
-## Run from a checkout
+## Install from a checkout
 
 ```sh
-python -m pip install --user .
-mkdir -p ~/.local/share/omookaway/activity ~/.config/omarchy/plugins/omookaway.status
-cp integrations/activity/shell.qml ~/.local/share/omookaway/activity/shell.qml
-cp integrations/omarchy-shell/* ~/.config/omarchy/plugins/omookaway.status/
-mkdir -p ~/.config/systemd/user
-cp systemd/*.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now omookaway.service omookaway-activity.service
+./install.sh
 ```
 
 Add `omookaway.status` to an Omarchy Shell bar section through Bar Settings,
@@ -52,7 +45,10 @@ without consuming a Snooze:
 omookaway pause 2026-08-17T14:30:00-07:00
 ```
 
-The widget displays the Pause deadline. Resume early with `omookaway resume`.
+The widget displays the Pause deadline. Right-click it to Pause for one hour,
+or use the command above to choose an exact time. Resume early with
+`omookaway resume`. When enforcement is unavailable, selecting the widget
+retries the owed Break.
 
 If aggregate activity observation cannot start or stops at runtime, Work
 Interval progress becomes dormant and the Shell reports `Activity unavailable`.
@@ -100,3 +96,14 @@ omookaway configure config.json
 ```sh
 python -m unittest discover
 ```
+
+After installing, verify the complete lifecycle in a real Omarchy session:
+
+```sh
+./smoke-test.sh
+```
+
+The guided smoke test checks a Warning, an enforced Break, fail-open release,
+restart continuity, and coverage across every connected display. Normal
+operation is entirely local and uses only aggregate activity, lock, and sleep
+transitions; it does not inspect raw input, applications, or window titles.

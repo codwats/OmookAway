@@ -5,6 +5,7 @@ After=omookaway.service
 Requires=omookaway.service
 
 [Service]
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
 ExecStart=/usr/bin/qs -p %h/.local/share/omookaway/activity
 ExecStopPost=-/usr/bin/env omookaway activity-observation unavailable
 Restart=on-failure

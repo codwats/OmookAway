@@ -196,6 +196,28 @@ class ShellCommandContractTest(unittest.TestCase):
         )
         self.assertIn("return mode + (isNaN(deadline.getTime())", widget)
 
+    def test_shell_widget_exposes_every_authoritative_control(self):
+        widget = (
+            Path(__file__).parents[1]
+            / "integrations"
+            / "omarchy-shell"
+            / "BarWidget.qml"
+        ).read_text()
+
+        for command in (
+            "start_manual_break",
+            "snooze",
+            "pause",
+            "resume",
+            "retry_enforcement",
+            "enter_degraded_wall_clock_mode",
+            "leave_degraded_wall_clock_mode",
+        ):
+            self.assertIn(f'commands.indexOf("{command}")', widget)
+
+        self.assertIn('command: ["omookaway", "retry-enforcement"]', widget)
+        self.assertIn('pauseProcess.command = ["omookaway", "pause"', widget)
+
 
 if __name__ == "__main__":
     unittest.main()
